@@ -1,11 +1,11 @@
 """
-    MeshLibrary.write_vtk(g::SurfaceGeometry, prefix)
+    MeshLibrary.write_vtk(g::SurfaceGeometry, prefix; cell_data=Dict(), point_data=Dict())
 
 Write `prefix_tris.vtu` (triangles with their kind, body, parent element, quality and trailing edge side, and node
-flags) and, when there are any, `prefix_edges.vtu` (every edge that is not interior, as a line with its class).
-Returns the file names.
+flags, plus any extra `cell_data` per triangle and `point_data` per node, e.g. a solution) and, when there are any,
+`prefix_edges.vtu` (every edge that is not interior, as a line with its class). Returns the file names.
 """
-function MeshLibrary.write_vtk(g::SurfaceGeometry, prefix::AbstractString)
+function MeshLibrary.write_vtk(g::SurfaceGeometry, prefix::AbstractString; cell_data=Dict(), point_data=Dict())
     pts = reduce(hcat, g.x)
     cells = [MeshCell(VTKCellTypes.VTK_TRIANGLE, collect(t)) for t in g.tris]
     te_side = [maximum(UInt8.(cs)) for cs in g.kutta.corner_side]
@@ -32,6 +32,13 @@ function MeshLibrary.write_vtk(g::SurfaceGeometry, prefix::AbstractString)
         vtk["trailing_edge", VTKPointData()] = node_te
         vtk["hanging", VTKPointData()] = node_hanging
         vtk["weld_multiplicity", VTKPointData()] = multiplicity
+        vtkdata(v) = eltype(v) <: AbstractVector ? reduce(hcat, v) : v
+        for (name, v) in cell_data
+            vtk[string(name), VTKCellData()] = vtkdata(v)
+        end
+        for (name, v) in point_data
+            vtk[string(name), VTKPointData()] = vtkdata(v)
+        end
     end
     special = findall(!=(Interior), g.edges.class)
     isempty(special) && return f1

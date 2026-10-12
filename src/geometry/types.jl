@@ -168,8 +168,8 @@ A closed, consistently oriented triangulation with classified edges, as consumed
   boundary) and `he_edge[h]` its edge.
 - `input_node`: welded node of every input node.
 - `tjunctions`, `gaps`, `openings`, `kutta`: the topology records the constraint matrix C is built from.
-- `touch_pairs`: triangles that touch without sharing a node (across T-junctions, gaps and non-matching trailing
-  edges), for the touching quadrature tier.
+- `touch_pairs`: triangles that touch without sharing an edge: along a T-junction's long edge, or facing each other
+  across a gap or a non-matching trailing edge (they may share an end node), for the contact quadrature tier.
 """
 struct SurfaceGeometry{T}
     x::Vector{SVector{3,T}}
