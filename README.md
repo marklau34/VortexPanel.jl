@@ -6,20 +6,22 @@ The design is in `Plan Galerkin Linear-Vortex Panel Solver (Rigid Wake Phase).md
 
 ## Status
 
-Steps 1 and 2 are done. They cover:
+Steps 1–3 are done. They cover:
 
 - **`VortexPanel.Geometry`** (step 1): turns surface meshes of quads and triangles into a closed, outward, classified triangulation. It welds nodes, splits quads, detects T-junctions, gaps and non-matching trailing edges, and caps open tips without adding nodes. It also detects Kutta edges and reports mesh quality.
 - **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges.
 - **MESA baseline** (step 1): a rigid-wake baseline on the reference wing family.
 - **`VortexPanel.DOFMap`** (step 2): the constraint matrix C, with μ_slots = C q, and the nodal Kutta rows K, with μ_w = K q.
+- **`VortexPanel.Kernels`** (step 3): the velocity of a unit-strength source triangle, w = (1/4π)∫(x−y)/|x−y|³ dA, the one kernel of the method (sources σw, vortex sheets γ×w).
 
-Not yet built: kernels, elements, wake geometry, assembly and post-processing.
+Not yet built: elements and quadrature tiers, wake geometry, assembly and post-processing.
 
 ## Layout
 
 ```
 src/geometry/    Geometry: build_geometry(mesh; opts) -> SurfaceGeometry, print_report, write_vtk, add_caps
 src/dofmap/      DOFMap: build_dofmap(g; opts) -> DOFMapping (C, K, slots), reduce_system, bordered_rows, wake_rows
+src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
 validation/      reference wing, MESA baseline, geometry report (own environment)
@@ -41,6 +43,7 @@ julia --project=validation validation/common/test_loads.jl                   # p
 julia -t auto --project=validation validation/morino_baseline/run_clean.jl   # MESA baseline: levels 1-3, open and capped tips
 julia -t auto --project=validation validation/morino_baseline/smoke_abuse.jl # MESA on each mesh abuse
 julia --project=validation validation/geometry/report_geometry.jl            # geometry and DOF map tables, and VTK
+julia --project=validation validation/kernels/compare_ase.jl                 # source kernel against AeroSingularityElements
 ```
 
 Outputs go to `validation/output/`, which is not tracked:
@@ -78,3 +81,17 @@ All topology decisions about the unknowns are made here (design doc §4 and §7)
   - Rows of K sum to zero, so a uniform μ sheds nothing.
   - `wake_rows(dm, te_of_wake_node)` gives the C rows of the wake nodes once the strips exist.
 - **Reduced system.** It is (Cᵀ A [C; W]) q = Cᵀ b (`reduce_system`). Each closed body adds a bordered row: `bordered_rows` gives e and c = Cᵀ∫φ dA.
+
+## Kernel
+
+`source_velocity(SourceTriangle(a, b, c), x; side)` gives w = (1/4π)∫_T (x−y)/|x−y|³ dA for a unit source spread over a flat triangle.
+
+- **Closed form.** The tangential part is (1/4π)Σₑ νₑ ln((rᵢ+rⱼ+dₑ)/(rᵢ+rⱼ−dₑ)), with outward in-plane edge normals νₑ. Its denominator is formed without cancellation, so points 1e-8 diameters from an edge stay accurate. The normal part is Ω/4π, from the signed solid angle (Van Oosterom–Strackee), positive on the side n points to.
+- **On the triangle's own plane:** the normal part is the one-sided limit chosen by `side`:
+  - `+1` on the n side, `−1` on the other, `0` for the principal value;
+  - this gives ±½ inside, ±¼ on an edge, ±α/4π at a vertex and 0 outside.
+  - The tangential part is log-singular on the edges and at the vertices, so it must not be evaluated there.
+- **Far field.** Beyond `FAR_DEFAULT` = 10 diameters the kernel switches to a monopole + quadrupole + octupole expansion. These use the triangle's exact moments, so the error is O((diam/r)⁴), and the jump at the switch is below 5e-6 relative.
+- **Number types.** The kernel is generic: ForwardDiff works through it (field and vertex derivatives), and Float32 stays Float32. It runs in about 40 ns per evaluation (25 ns in the far field) with no allocations.
+- **Validation.** Tests compare against two independent references: a semi-analytic polar quadrature that covers far, near, in-plane, edge- and vertex-adjacent points, slivers and 175° triangles, and adaptive cubature. They also check divergence- and curl-free fields, Gauss's law and the ½ jump.
+- **AeroSingularityElements' `vel_srcpan`** (MESA's routine) is not reused. It agrees to ~1e-13 at regular points, but it zeroes an edge's log term within an absolute 1e-8 of the edge (100% wrong at 1e-9 diameters there), has no one-sided limits and no far field; `validation/kernels/compare_ase.jl` shows this.

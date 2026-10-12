@@ -20,4 +20,5 @@ include(joinpath(@__DIR__, "helpers.jl"))
     @testset "Geometry pathologies" include("geometry/test_pathologies.jl")
     @testset "Mesh abuse" include("meshtools/test_abuse.jl")
     @testset "DOF map" include("dofmap/test_dofmap.jl")
+    @testset "Kernels" include("kernels/test_kernels.jl")
 end
