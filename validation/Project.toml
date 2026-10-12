@@ -1,0 +1,16 @@
+[deps]
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MESA = "b68a247e-2d60-45cd-9e5e-e91cce3c4c34"
+MeshLibrary = "2a0e3053-d7ad-441e-be9f-5563ad5a0828"
+PAGE = "06e91fdb-a269-4ec9-9009-aa1343594342"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StableRNGs = "860ef19b-820b-49d6-a774-d7a799459cd3"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+VortexPanel = "d2389cc8-2eb9-49a3-9842-9e2c4cf6cf7d"
+
+[sources]
+MESA = {path = "../../MESA.jl"}
+MeshLibrary = {path = "../../MeshLibrary.jl"}
+PAGE = {path = "../../_tools_release/PAGE"}
+VortexPanel = {path = ".."}
