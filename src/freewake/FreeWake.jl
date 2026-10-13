@@ -21,10 +21,10 @@ using ..Assembly: AssemblyOptions, assemble, source_strengths, factorize_galerki
     explicit_rhs, Segment
 import ..Assembly: ExplicitSources
 using ..Post: body_velocity, gradient_velocity, pressure_coefficient, pressure_force, kutta_joukowski_force,
-    element_values, sheet_strengths
+    element_values, sheet_strengths, nodal_average
 
 export FreeWakeOptions, FreeWakeSim, FreeWakeState, step!, run!, vortex_elements, convert_oldest!, free_wake_blobs,
-    vorticity_moments, write_free_wake_vtk
+    vorticity_moments, write_free_wake_vtk, write_body_vtk, FreeWakeSeries
 
 include("state.jl")
 include("step.jl")

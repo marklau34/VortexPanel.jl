@@ -30,6 +30,6 @@ export build_elements, AssemblyOptions, assemble, source_strengths, bordered_sys
 export factorize_galerkin, explicit_rhs, ExplicitSources
 export surface_velocity, gradient_velocity, pressure_coefficient, body_velocity
 export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading, surface_pressure
-export FreeWakeOptions, FreeWakeSim, step!, run!, write_free_wake_vtk
+export FreeWakeOptions, FreeWakeSim, step!, run!, write_free_wake_vtk, write_body_vtk, FreeWakeSeries
 
 end # module VortexPanel

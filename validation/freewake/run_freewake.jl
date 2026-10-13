@@ -18,6 +18,8 @@
 # E. MESA's free wake on the same mesh (L1) with the same time step, trailing edge panel, max_rows and particle core,
 #    prescribed and free; and both codes' lift against the trailing edge panel's length.
 # F. Abused meshes (MESA's smoke set and all at once): the free wake runs, and its lift change from the clean mesh.
+# G. Small time steps (L1): dt / 4 and dt / 8 with the automatic conversion distance, with and without merging the
+#    converted rows into fewer particles (merge_rows = :auto), against a fixed max_rows.
 # Writes validation/output/freewake/ (CSV tables, SVG plots, VTK).
 
 using MESA, MeshLibrary, PAGE, LinearAlgebra, StaticArrays, Printf, DelimitedFiles, StableRNGs, Logging
@@ -214,7 +216,7 @@ function extrapolate_length(cl, L0)
 end
 
 function free_wake(levels, base)
-    println("\nD. Free wake to $SPANS spans: forward Euler on the free nodes and particles, max_rows = 10, core 1.5 × element size")
+    println("\nD. Free wake to $SPANS spans: forward Euler on the free nodes and particles, max_rows = 10, automatic cores (overlap 1.5)")
     rows, hist_rows, series, res = Any[], Any[], Any[], Dict{Int,Any}()
     for (i, l) in enumerate(levels)
         mesh = reference_wing(l; split_te=false)
@@ -266,7 +268,7 @@ function sensitivity(res)
     g, dm, dt = r0.sim.g, r0.sim.dm, r0.sim.opts.dt
     n0 = length(r0.cl.kj)
     rows = Any[]
-    for (label, kw) in (("core 1.0 × size", (core_factor=1.0,)), ("core 2.5 × size", (core_factor=2.5,)), ("max_rows 4", (max_rows=4,)),
+    for (label, kw) in (("core overlap 1.0", (overlap=1.0,)), ("core overlap 2.5", (overlap=2.5,)), ("max_rows 4", (max_rows=4,)),
         ("max_rows 20", (max_rows=20,)), ("dt × 2", (dtf=2.0,)), ("dt / 2", (dtf=0.5,)))
         dtf = get(kw, :dtf, 1.0)
         r = run_free(g, dm, dtf * dt; (k => v for (k, v) in pairs(kw) if k != :dtf)...)
@@ -276,6 +278,32 @@ function sensitivity(res)
         GC.gc()
     end
     writedlm(joinpath(OUTDIR, "sensitivity.csv"), vcat(["case" "dCL_p_pct" "dCL_KJ_pct" "particles" "time"], reduce(vcat, rows)), ',')
+end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# G. small time steps
+
+function small_time_steps()
+    println("\nG. Small time steps (L1, free wake, 2 spans): rows |V∞| dt long, max_rows = :auto (a fixed distance behind the")
+    println("   trailing edge), with and without merging the converted rows (merge_rows = :auto), and max_rows = 10 at dt / 4")
+    g, dm = setup(reference_wing(1; split_te=false))
+    ℓ = te_size(g)
+    @printf("%-18s %9s %9s %10s %8s %10s %6s %8s\n", "case", "CL", "CL KJ", "ΔCL KJ", "max|u|", "particles", "rows", "time")
+    rows = Any[]
+    local ref
+    for (label, f, kw) in (("dt", 1, NamedTuple()), ("dt, merged", 1, (merge_rows=:auto,)), ("dt / 4, 10 rows", 4, (max_rows=10,)),
+        ("dt / 4", 4, NamedTuple()), ("dt / 4, merged", 4, (merge_rows=:auto,)), ("dt / 8", 8, NamedTuple()), ("dt / 8, merged", 8, (merge_rows=:auto,)))
+        r = with_logger(NullLogger()) do # the 10-row case warns about its conversion distance
+            run_free(g, dm, ℓ / f; spans=2.0, kw...)
+        end
+        f == 1 && isempty(kw) && (ref = r)
+        um = maximum(rec.umax for rec in r.sim.history) / norm(VF)
+        @printf("%-18s %9.5f %9.5f %+9.3f%% %8.3f %10d %6d %7.0fs\n", label, r.cl.p[end], r.cl.kj[end], 100(r.cl.kj[end] / ref.cl.kj[end] - 1), um,
+            length(r.sim.state.particles), r.sim.keep_rows, r.time)
+        push!(rows, [csv_label(label) f r.cl.p[end] r.cl.kj[end] um length(r.sim.state.particles) r.sim.keep_rows r.time])
+        GC.gc()
+    end
+    writedlm(joinpath(OUTDIR, "small_dt.csv"), vcat(["case" "dt_divisor" "CL_p" "CL_KJ" "max_u" "particles" "rows" "time"], reduce(vcat, rows)), ',')
 end
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -298,7 +326,7 @@ function mesa_comparison()
     mm = mesa_mesh(mesh)
     rows, series = Any[], Any[]
     for (i, prescribed) in enumerate((true, false))
-        ours = run_free(g, dm, ℓ; te_len=TE_LEN, max_rows=10, core_factor=1e-9, core_floor=δ, advection=prescribed ? :freestream : :free)
+        ours = run_free(g, dm, ℓ; te_len=TE_LEN, max_rows=10, core=δ, advection=prescribed ? :freestream : :free)
         mcl, mt = with_logger(NullLogger()) do
             mesa_freewake(mm; dt=ℓ / VINF, nsteps=ours.nsteps, maxwakelen=10, te_len=TE_LEN, r_vortex=δ, prescribed=prescribed)
         end
@@ -322,7 +350,7 @@ function mesa_comparison()
     trows = Any[]
     for f in (0.25, 0.5, 1.0, 2.0)
         tl = f * ℓ
-        ours = run_free(g, dm, ℓ; spans=2.0, te_len=tl, max_rows=10, core_factor=1e-9, core_floor=δ, advection=:freestream)
+        ours = run_free(g, dm, ℓ; spans=2.0, te_len=tl, max_rows=10, core=δ, advection=:freestream)
         mcl, _ = with_logger(NullLogger()) do
             mesa_freewake(mm; dt=ℓ / VINF, nsteps=ours.nsteps, maxwakelen=10, te_len=tl, r_vortex=δ, prescribed=true)
         end
@@ -374,6 +402,7 @@ function main(args=ARGS)
     conversion(base)
     res = free_wake(levels, base)
     sensitivity(res)
+    small_time_steps()
     mesa && mesa_comparison()
     abused(abused_levels, res)
     println("\nWrote ", normpath(OUTDIR))

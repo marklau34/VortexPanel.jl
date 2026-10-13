@@ -71,8 +71,9 @@ julia -t auto --project=validation validation/wing/run_wing.jl               # v
 julia -t auto --project=validation validation/comparison/run_comparison.jl   # validation stage 6: against MESA (~25 min)
 julia -t auto --project=validation validation/elements/run_elements.jl       # validation stage 7: triangles against quads (~2 h)
 julia -t auto --project=validation validation/test_weights/run_test_weights.jl # validation stage 8: test weights (~20 min)
-julia -t auto --project=validation validation/freewake/run_freewake.jl     # phase 2: free wake and particles, against MESA (~25 min)
+julia -t auto --project=validation validation/freewake/run_freewake.jl     # phase 2: free wake and particles, against MESA (~35 min)
 julia -t auto --project=validation validation/examples/abused_wing.jl level=2 abuse=all   # example: abused wing, Cp in VTK
+julia -t auto --project=validation validation/examples/free_wake.jl level=1 max_rows=10  # example: free wake roll-up, ParaView time series
 ```
 
 `abused_wing.jl` solves the clean and an abused reference wing and writes both for ParaView: colour the `*_tris.vtu` files by `Cp`. The `abuse` argument is one of `all`, `jitter`, `slivers`, `gaps`, `tjunctions`, `tjunctions_midspan`, `skew`, `te_misaligned` or `clean`; `count=N` sets how many quads the T-junction abuses split (default 4). The script header lists every exported field.
@@ -88,6 +89,7 @@ Outputs go to `validation/output/`, which is not tracked:
 - `ellipsoid/` the exact-solution checks, convergence, abused-mesh and quadrature-sensitivity CSVs, Cp along the cut y = 0 of the triaxial body, and VTK of the finest triaxial, prolate and thin oblate meshes and the fully abused triaxial one;
 - `wing/` a summary CSV of every case, the spanwise loading per level (Γ, sectional lift by both routes), chordwise Cp at η = 0, 0.5, 0.8 and 0.95, and VTK of the body (Cp, μ) and the wake (μ_w, tip filaments);
 - `examples/` the VTK of `abused_wing.jl`: body (Cp, Cp at the nodes, μ, quality), classified edges, wake (μ_w) and tip filaments;
+- `examples/free_wake_L<level>_rows<max_rows>/` the time series of `free_wake.jl`: body.pvd (Cp, unsteady), te_panel.pvd (μ_w), free.pvd (the free rows' μ), particles.pvd (strength vectors, magnitudes, cores) and lift.csv. Open the four .pvd files together in ParaView and play; the script's header has viewing tips;
 - `comparison/` CSV tables and SVG plots of every section of the stage-6 study (refinement, refinement by direction, the two-dimensional limit, Cp and spanwise loading, skew, trailing-edge misalignment, zero incidence, robustness), and `provenance.txt` with the codes' git commits;
 - `elements/` CSV tables and SVG plots of the stage-7 study (cube-sphere, refinement, sectional accuracy with each aspect ratio's values, Γ around midspan, midspan Cp, skew with both tip conditions, trailing-edge misalignment, zero incidence, abused meshes);
 - `test_weights/` CSV tables and SVG plots of the stage-8 study (refinement, sectional accuracy, midspan Cp, abused meshes, zero incidence);
@@ -615,7 +617,7 @@ A split that never flips under small perturbations would give the triangles the 
 This is the design doc's first deferred item. Its time stepping mirrors MESA's:
 - an implicit trailing-edge panel carries the Kutta condition;
 - the free panel rows behind it keep their strength once shed and move with the flow by forward Euler;
-- beyond `max_rows` rows the oldest row is converted into vortex particles;
+- beyond `max_rows` rows the oldest row is converted into vortex particles (`:auto` sets the count from a fixed distance behind the trailing edge), optionally merged into fewer particles (`merge_rows`);
 - there is no vortex stretching yet.
 
 The conversion itself follows the design doc, not MESA. It is local to each wake triangle: a triangle's particle comes from its own corner doublets and corners only, and nothing is converted across the interface edge (details below).
@@ -624,9 +626,10 @@ The conversion itself follows the design doc, not MESA. It is local to each wake
 
 ```julia
 sim = FreeWakeSim(g, dm, V∞; opts=FreeWakeOptions(dt=0.06, max_rows=10))  # assembles and factors once
-run!(sim, 200)                            # sim.history: the loads of every step
-write_free_wake_vtk(sim, "out/wing")      # the free rows and the particles, for ParaView
+run!(sim, 200; series=FreeWakeSeries("out/wing"; every=4))  # sim.history: the loads of every step
 ```
+
+The series writes a ParaView frame every 4 steps: the body's pressure, the trailing-edge panel, the free rows and the particles, as each step's solve saw them, plus .pvd collections that carry the times. `validation/examples/free_wake.jl` runs it on the reference wing.
 
 **Coupling.**
 - **The trailing-edge panel is implicit.** `te_panel` builds one row of wake strips of length te_len (default 0.3 |V∞| dt), closed by a filament along its downstream edge (`WakeOptions(rows, ending=:closed)`). It is assembled with the body, and the bordered matrix is factored once (`factorize_galerkin`). Its doublets follow the Kutta rows, as for the rigid wake.
@@ -662,12 +665,25 @@ Each triangle's particle uses only that triangle's corners and corner doublets, 
 
 MESA's constant-strength panels carry all their vorticity on their edges, so its conversion has to share those edges between neighbours. The linear doublet here carries the vorticity as sheets inside the triangles, and there are no filaments between triangles to share.
 
+**When to convert, and merging.**
+- **`max_rows = :auto` (the default)** keeps as many free rows as put the new particles three cores behind the trailing edge, using the widest strip's first particles. That distance does not change with dt. On the reference wing it is 10 rows at a dt of one trailing-edge panel, 38 at dt / 4 and 77 at dt / 8. A given number of rows works like MESA's `maxwakelen`.
+- **`merge_rows = :auto`** merges, strip by strip, as many converted rows into one particle pair as make the merged quad about as long as the strip is wide. That is round(width / |V∞| dt): 2–17 rows at dt / 4 on the reference wing, where the narrow tip strips keep their fine particles.
+  - The fine particles of an unfinished batch act as they are.
+  - When the batch completes, each of the two new particles sums the vorticity of the fine triangles on its side of the merged quad's diagonal, placed at their strength-weighted centre.
+  - The total vorticity is conserved exactly, and the impulse to the batch's spread (7e-5).
+  - The default is `merge_rows = 1`, with no merging, as validated above.
+
 **Velocities at wake points.** The body uses its exact kernels. Every wake element is a Rosenhead–Moore blob:
 - the trailing-edge panel's and free rows' sheets are represented by the particles a conversion would create;
 - their filaments by 2-point Gauss blobs;
 - the particles by themselves.
 
-Cores are 1.5 × the element's size, and at least |V∞| dt. The exact panel kernels are singular at the wake's own nodes; MESA uses lines with Rankine cores there. With this representation a conversion changes no wake velocity, only the body's right-hand side.
+The exact panel kernels are singular at the wake's own nodes; MESA uses lines with Rankine cores there. With this representation a conversion changes no wake velocity, only the body's right-hand side.
+
+**Core radii** are chosen automatically (`CoreRule`, `FreeWakeOptions(core=:auto)`).
+- **The rule.** Each core is `overlap` (1.5) × half the element's longest edge. A conversion puts two particles in each quad, about half the quad's longer side apart, so neighbouring particles overlap in every direction however thin the rows are. Filament blobs take `overlap` × half a segment, the spacing of their 2-point pairs.
+- **Alternatives.** `core = :scaled` keeps the earlier rule: 1.5 × √(2A), at least |V∞| dt. A number gives every particle that core, like MESA's `r_vortex`.
+- **A warning.** `FreeWakeSim` warns when `max_rows` would create particles within two cores of the trailing edge, and says how many rows avoid it.
 
 **Loads** (each step):
 - **Pressure:** Cp = 1 − |u|²/V∞² − 2μ̇/V∞², with μ̇ by backward difference.
@@ -714,9 +730,33 @@ Particles close to the body stand for the sheet less well than its panels, so co
 
 - **Roll-up lowers the lift slightly.** Free against prescribed at 5 spans (L1) is −0.41% by pressure and −0.37% by Kutta–Joukowski. Extrapolated, the free wake sits 0.24–0.35% below the rigid wake at both levels.
 - **The settings hardly matter** (L1, at 5 spans):
-  - particle cores 1.0× and 2.5× the element size: ±0.05%;
+  - core overlap 1.0 and 2.5 (default 1.5): −0.03% and +0.01%. The tables above used the earlier area-based cores, which differ from the automatic ones by 0.01%;
   - `max_rows` 4 and 20: +0.13% and +0.01%;
   - dt doubled or halved: under 0.01%.
+- **Converting every row at once costs lift accuracy.**
+  - With `max_rows` = 0, the first row shed behind the trailing-edge panel becomes particles at once, so particles sit just behind the trailing edge. The extrapolated lift (L1) comes out 2.3% above never converting and 2.0% above the rigid wake.
+  - Keeping 1, 4 or 10 rows brings this down to +0.9%, +0.14% and +0.02%.
+  - The cores cause most of it. At `max_rows` 0, cores of 0.75× and 0.4× the element size leave +1.3% and +1.0%, at the price of a noisier field (peak velocity 1.07 |V∞|). The rest comes from lumping each triangle's sheet into a point that close to the trailing edge.
+- **A small time step bunches the rows,** each only |V∞| dt long. Three things follow, each with a fix:
+  - **The conversion point moves.** A fixed `max_rows` converts closer to the wing. With 10 rows at dt / 4 the particles sit 0.8 cores behind it and the lift rises 0.5%; `max_rows = :auto` keeps the distance fixed.
+  - **Spanwise gaps.** Area-based cores shrink with the rows and leave gaps across the span (peak velocity 1.03 |V∞|); the automatic cores don't.
+  - **Cost.** The particle count grows like 1/dt, and the direct particle sums make the cost grow faster still. `merge_rows = :auto` keeps the count near the default time step's.
+
+  Section G of the validation script measures this (L1, free wake, 2 spans; ΔCL against the default dt without merging):
+
+  | case | ΔCL (KJ) | peak velocity | particles | free rows | time |
+  |---|---|---|---|---|---|
+  | dt (a trailing-edge panel) | 0 | 1.014 | 3,188 | 10 | 3 s |
+  | dt, merged | +0.04% | 1.015 | 1,752 | 10 | 3 s |
+  | dt / 4, `max_rows` = 10 | +0.51% | 1.017 | 13,752 | 10 | 50 s |
+  | dt / 4 | −0.03% | 1.017 | 12,688 | 38 | 56 s |
+  | dt / 4, merged | +0.03% | 1.011 | 3,176 | 38 | 31 s |
+  | dt / 8 | +0.03% | 1.018 | 25,304 | 77 | 268 s |
+  | dt / 8, merged | +0.08% | 1.011 | 5,054 | 77 | 133 s |
+
+  - **The lift is independent of the time step to 0.03%** once the conversion distance is fixed.
+  - **Merging changes it by at most 0.08%,** cuts the particles 4–5×, smooths the field slightly, and halves the run time.
+  - **What remains of the cost:** the steps and the free rows near the wing, whose number also grows like 1/dt within the fixed conversion distance.
 - **It stays well behaved.** Velocities stay below 1.03 |V∞|.
 - **Without stretching the total vorticity drifts.** The far edge of the panel rows stretches while the particles' strengths stay fixed. By 5 spans |Ω_total| is 0.7% (L1) and 4% (L2) of the largest μ_w times the span. The impulse route depends on that drift, so in free mode it is unreliable: +1.7% against Kutta–Joukowski at L2. The pressure and Kutta–Joukowski routes are unaffected.
 - **Cost.** At the end of the L2 run a step takes 1.8 s on 16 threads, with 32,684 particles: direct particle sums, the body's velocity at every particle, and every particle in the right-hand side. L3, or longer wakes, would need particle deletion (`delete_beyond`) or a treecode.

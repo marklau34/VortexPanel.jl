@@ -19,7 +19,9 @@ mutable struct FreeWakeSim{T}
     b0::Vector{T}
     F::GalerkinFactorization
     state::FreeWakeState{T}
-    core_floor::T
+    core::CoreRule{T}
+    keep_rows::Int
+    merge::Union{Nothing,Vector{Int}}
     n::Int
     t::T
     μ::Vector{T}
@@ -44,16 +46,53 @@ function FreeWakeSim(g::SurfaceGeometry{T}, dm::DOFMapping, V∞::SVector{3}; op
     end
     topo = Topology(dm)
     edge = [te.x[topo.nte+k] for k in 1:topo.nte] # the trailing edge panel's downstream edge (its row 1)
-    floor = T(something(opts.core_floor, norm(V) * opts.dt))
-    return FreeWakeSim(g, dm, els, σ, V, opts, assembly, te, edge, topo, b0, F, FreeWakeState{T}(topo.nte), floor, 0, zero(T),
-        zeros(T, dm.nslot), zeros(T, topo.nte), zeros(T, length(els)), zero(SVector{3,T}), Any[], t_setup)
+    core = CoreRule(opts, V)
+    row = norm(V) * opts.dt
+    keep = opts.max_rows === :auto ? rows_for_distance(3, core, edge, topo, te.rows[2], row) : opts.max_rows
+    opts.max_rows === :auto || check_conversion_distance(keep, core, edge, topo, te.rows[2], row)
+    widths = [norm(edge[B] - edge[A]) for (A, B) in topo.segments]
+    merge = opts.merge_rows === :auto ? [max(1, round(Int, w / row)) for w in widths] :
+            opts.merge_rows == 1 ? nothing : fill(opts.merge_rows, length(widths))
+    return FreeWakeSim(g, dm, els, σ, V, opts, assembly, te, edge, topo, b0, F, FreeWakeState{T}(topo.nte, length(topo.segments)), core,
+        keep, merge, 0, zero(T), zeros(T, dm.nslot), zeros(T, topo.nte), zeros(T, length(els)), zero(SVector{3,T}), Any[], t_setup)
 end
 
 Base.show(io::IO, s::FreeWakeSim) = print(io, "FreeWakeSim: step $(s.n), t = $(s.t), $(max(length(s.state.x) - 1, 0)) free rows, ",
     "$(length(s.state.particles)) particles")
 
-"""Core of a blob standing for an element of size h"""
-core_of(sim::FreeWakeSim, h) = max(sim.opts.core_factor * h, sim.core_floor)
+"""The core of the widest strip's first particles (a triangle of its first converted quad, rows `row` long)"""
+function first_core(core::CoreRule, edge, topo::Topology, row::Real)
+    w = maximum(norm(edge[B] - edge[A]) for (A, B) in topo.segments)
+    o = zero(edge[1])
+    return core(o, o + SVector(w, 0, 0), o + SVector(w, row, 0))
+end
+
+"""
+    conversion_distance(max_rows, core, edge, topo, te_len, row)
+
+Where the first particles are created behind the trailing edge (the middle of the oldest row, `max_rows` rows of length
+`row` behind the trailing edge panel), in cores of the widest strip's first particles (`first_core`). Below about two
+cores the particles' smoothed field misrepresents the sheet next to the wing and biases the lift (validation: 0.25
+cores +2.3%, 0.55 +0.9%, 1.5 +0.14%, 3.3 +0.02%). Returns the distance in cores and the core.
+"""
+function conversion_distance(max_rows::Integer, core::CoreRule, edge, topo::Topology, te_len::Real, row::Real)
+    δ = first_core(core, edge, topo, row)
+    return (te_len + (max_rows + 0.5) * row) / δ, δ
+end
+
+"""The fewest rows that create the first particles at least `cores` cores behind the trailing edge"""
+rows_for_distance(cores::Real, core::CoreRule, edge, topo::Topology, te_len::Real, row::Real) =
+    max(0, ceil(Int, (cores * first_core(core, edge, topo, row) - te_len) / row - 0.5))
+
+"""Warn when particles would be created within two cores of the trailing edge, with the `max_rows` that avoids it"""
+function check_conversion_distance(max_rows::Integer, core::CoreRule, edge, topo::Topology, te_len::Real, row::Real)
+    d, δ = conversion_distance(max_rows, core, edge, topo, te_len, row)
+    if d < 2
+        need = rows_for_distance(2, core, edge, topo, te_len, row)
+        @warn "Particles would be created $(round(d, digits=2)) cores behind the trailing edge (core $(round(δ, sigdigits=3))), which biases the lift; max_rows = $need keeps them two cores away"
+    end
+    return d
+end
 
 """
     step!(sim)
@@ -73,7 +112,7 @@ Returns the step's record (also pushed to `sim.history`).
 """
 function step!(sim::FreeWakeSim{T}) where {T}
     st, o, dm = sim.state, sim.opts, sim.dm
-    core = h -> core_of(sim, h)
+    core = sim.core
     we = vortex_elements(st, sim.topo)
     t_rhs = @elapsed rhs = explicit_rhs(sim.els, dm, ExplicitSources(we, st.particles); opts=sim.assembly)
     sol = solve_galerkin(sim.F, sim.b0 + rhs)
@@ -93,8 +132,8 @@ function step!(sim::FreeWakeSim{T}) where {T}
     end
     pushfirst!(st.x, copy(sim.edge))
     pushfirst!(st.μ, copy(μ_w))
-    while length(st.x) - 1 > o.max_rows
-        convert_oldest!(st, sim.topo, core)
+    while length(st.x) - 1 > sim.keep_rows
+        convert_oldest!(st, sim.topo, core, sim.merge)
     end
     isfinite(o.delete_beyond) && delete_far!(sim)
     rec = merge((n=sim.n, t=sim.t), loads, (rows=length(st.x) - 1, particles=length(st.particles), λ=sol.λ[1],
@@ -151,19 +190,27 @@ end
 function delete_far!(sim::FreeWakeSim)
     d = normalize(sim.V∞)
     limit = maximum(dot(x, d) for x in sim.edge) + sim.opts.delete_beyond * sim.te.span
-    filter!(p -> dot(p.x, d) <= limit, sim.state.particles)
+    keep_particles!(sim.state, [dot(p.x, d) <= limit for p in sim.state.particles])
     return sim
 end
 
 """
-    run!(sim, nsteps; progress=nothing)
+    run!(sim, nsteps; progress=nothing, series=nothing)
 
-Take `nsteps` steps (`step!`), calling `progress(sim, record)` after each if given. Returns the history.
+Take `nsteps` steps (`step!`), calling `progress(sim, record)` after each if given. With a `FreeWakeSeries`, every
+`series.every` steps and the last are written as a ParaView frame: the wake as the step's solve saw it (written before
+the step moves it) with the body's pressure and the trailing edge panel from that solve, at the step's time; the .pvd
+collections are written at the end. Returns the history.
 """
-function run!(sim::FreeWakeSim, nsteps::Integer; progress=nothing)
-    for _ in 1:nsteps
+function run!(sim::FreeWakeSim, nsteps::Integer; progress=nothing, series=nothing)
+    for k in 1:nsteps
+        save = !isnothing(series) && (sim.n % series.every == 0 || k == nsteps)
+        stem = save ? joinpath(series.dir, "frame_" * lpad(sim.n, 5, '0')) : ""
+        wake_files = save ? write_free_wake_vtk(sim, stem) : String[]
         rec = step!(sim)
+        save && add_frame!(series, rec.t, [write_body_vtk(sim, stem); wake_files])
         isnothing(progress) || progress(sim, rec)
     end
+    isnothing(series) || write_collections(series)
     return sim.history
 end
