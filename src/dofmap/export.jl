@@ -1,9 +1,9 @@
-const CONSTRAINT_CODE = Dict(:free => 0, :tjunction => 1, :gap => 2, :zip => 3)
+const CONSTRAINT_CODE = Dict(:free => 0, :tjunction => 1, :gap => 2, :zip => 3, :tip => 4)
 
 """
     MeshLibrary.write_vtk(dm::DOFMapping, g::SurfaceGeometry, prefix)
 
-Write `prefix_slots.vtu` (a vertex per slot with its constraint kind: 0 free, 1 T-junction, 2 gap, 3 zip; its
+Write `prefix_slots.vtu` (a vertex per slot with its constraint kind: 0 free, 1 T-junction, 2 gap, 3 zip, 4 tip; its
 trailing edge side: 0 none, 1 upper, 2 lower; and ∫φ dA) and, when there is a trailing edge, `prefix_wake_te.vtu` (the
 wake trailing edge lines with their tangent and bisector). Returns the file names.
 """

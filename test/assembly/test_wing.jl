@@ -1,5 +1,6 @@
-# Validation stage 5 in brief: the reference wing with a rigid wake, by both force routes. The full study is
-# validation/wing (convergence to CL ≈ 0.340, abused meshes, tip treatments, wake options, MESA's baseline).
+# Validation stage 5 in brief: the reference wing with a rigid wake, by both force routes, with the default zero-tip
+# Kutta condition. The full study is validation/wing (convergence to CL ≈ 0.340, abused meshes, tip treatments, wake
+# options, MESA's baseline).
 
 using VortexPanel.DOFMap: nwake_te
 
@@ -12,7 +13,8 @@ const R1 = solve_wing(WING1)
     @test abs(R1.CDi_T / R1.CDi_p - 1) < 0.2 # the two induced drag routes, converging under refinement
     @test abs(R1.CY) < 1e-5
     @test norm(R1.μ_w - reverse(R1.μ_w)) < 0.01 * norm(R1.μ_w) # symmetric loading
-    @test 0 < R1.tip < 0.3 # the tip's share of the loading falls under refinement
+    line = R1.dm.wake_te.lines[1]
+    @test R1.μ_w[first(line)] == 0 && R1.μ_w[last(line)] == 0 && R1.tip == 0 # the Kutta condition at the tip corners
 end
 
 @testset "Kutta condition and system" begin
@@ -24,21 +26,22 @@ end
     rj = solve_wing(WING1; jacobi=true) # the condition number with the rows scaled by the diagonal (validation stage 6)
     @test rj.CL ≈ R1.CL rtol = 1e-12
     @test 1e3 < rj.cond_jacobi < R1.cond
-    # zero lift at zero incidence; the caps' corners at the trailing edge's end nodes take the upper copy, which
-    # breaks the up-down symmetry at the tips a little
+    # zero lift at zero incidence: with no jump at the tips the caps' trailing edge corners keep the up-down symmetry
     r0 = solve_wing(WING1; α=0.0)
-    @test abs(r0.CL) < 1e-3 && maximum(abs, r0.μ_w) < 5e-3
+    @test abs(r0.CL) < 2e-5 && maximum(abs, r0.μ_w) < 1e-3
 end
 
-@testset "zero tip Kutta condition" begin
-    z = solve_wing(WING1; dofmap=DOFMapOptions(tip_kutta=:zero))
-    line = z.dm.wake_te.lines[1]
-    @test z.μ_w[first(line)] == 0 && z.μ_w[last(line)] == 0
-    @test abs(z.CL / R1.CL - 1) < 0.03 # level 1: 1.7% below the free tips
-    @test z.columns < 1e-4 && abs(z.λ) < 1e-8
-    # with no jump at the tips the caps' trailing edge corners no longer break the up-down symmetry
-    z0 = solve_wing(WING1; α=0.0, dofmap=DOFMapOptions(tip_kutta=:zero))
-    @test abs(z0.CL) < 2e-5 && maximum(abs, z0.μ_w) < 1e-3
+@testset "free tip Kutta condition" begin
+    f = solve_wing(WING1; dofmap=DOFMapOptions(tip_kutta=:free))
+    line = f.dm.wake_te.lines[1]
+    @test f.μ_w[first(line)] > 0 && f.μ_w[last(line)] > 0
+    @test 0 < f.tip < 0.3 # the tip's share of the loading falls slowly under refinement
+    @test abs(f.CL / R1.CL - 1) < 0.03 # level 1: 1.8% above the zero tips; both converge to CL ≈ 0.340
+    @test f.columns < 1e-4 && abs(f.λ) < 1e-8
+    # the caps' corners at the trailing edge's end nodes take the upper copy, and the jump to the lower one is left
+    # out, which breaks the up-down symmetry at the tips a little
+    f0 = solve_wing(WING1; α=0.0, dofmap=DOFMapOptions(tip_kutta=:free))
+    @test 1e-5 < abs(f0.CL) < 1e-3 && maximum(abs, f0.μ_w) < 5e-3
 end
 
 @testset "wake options" begin

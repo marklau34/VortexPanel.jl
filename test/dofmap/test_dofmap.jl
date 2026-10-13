@@ -14,15 +14,21 @@ const WING_DM = build_dofmap(WING_G)
 
 @testset "clean wing" begin
     g, dm = WING_G, WING_DM
-    @test dm.nslot == 702 && dm.nq == 702 && count(>(0), dm.lower_slot) == 18
-    @test dm.C == sparse(I, 702, 702)
+    @test dm.nslot == 702 && count(>(0), dm.lower_slot) == 18
+    # by default (tip_kutta = :zero) the tips' lower trailing edge copies follow the upper ones; every other slot is free
+    tips = sort([dm.lower_slot[dm.wake_te.node[k]] for k in (1, 18)])
+    @test findall(==(:tip), dm.constraint) == tips && dm.nq == 700
+    for s in 1:dm.nslot
+        cols, vals = findnz(dm.C[s, :])
+        @test cols == [dm.q_of_slot[s in tips ? dm.slot_node[s] : s]] && vals == [1.0]
+    end
     check_row_sums(dm)
-    @test size(dm.K) == (18, 702)
-    # each Kutta row is +1 on the trailing edge node's slot and -1 on its lower copy
+    @test size(dm.K) == (18, 700)
+    # each Kutta row is +1 on the trailing edge node's slot and -1 on its lower copy; at the tips the two cancel
     for k in 1:18
         v = dm.wake_te.node[k]
         cols, vals = findnz(dm.K[k, :])
-        @test Dict(zip(cols, vals)) == Dict(dm.q_of_slot[v] => 1.0, dm.q_of_slot[dm.lower_slot[v]] => -1.0)
+        @test k in (1, 18) ? isempty(cols) : Dict(zip(cols, vals)) == Dict(dm.q_of_slot[v] => 1.0, dm.q_of_slot[dm.lower_slot[v]] => -1.0)
     end
     # lower surface corners at trailing edge nodes take the copies, every other corner its node
     for t in eachindex(g.tris), k in 1:3
@@ -57,15 +63,17 @@ end
     @test_throws ArgumentError build_dofmap(g; opts=DOFMapOptions(cap_te_copy=:both))
 end
 
-@testset "zero tip Kutta condition" begin
-    dz = build_dofmap(WING_G; opts=DOFMapOptions(tip_kutta=:zero))
-    tips = findall(==(:tip), dz.constraint)
-    @test sort(tips) == sort([WING_DM.lower_slot[dz.wake_te.node[k]] for k in (1, 18)]) && dz.nq == WING_DM.nq - 2
-    check_row_sums(dz)
-    # the tips' lower copies follow the upper ones: their Kutta rows vanish, the others keep their two entries
-    @test iszero(dz.K[1, :]) && iszero(dz.K[18, :])
-    @test all(nnz(dz.K[k, :]) == 2 for k in 2:17)
-    @test reproduction_error(dz, WING_G, linear_field) < 1e-12
+@testset "free tip Kutta condition" begin
+    df = build_dofmap(WING_G; opts=DOFMapOptions(tip_kutta=:free))
+    @test df.nq == 702 && df.C == sparse(I, 702, 702) && !any(==(:tip), df.constraint)
+    check_row_sums(df)
+    # every Kutta row is +1 on the trailing edge node's slot and -1 on its lower copy, the tips' included
+    for k in 1:18
+        v = df.wake_te.node[k]
+        cols, vals = findnz(df.K[k, :])
+        @test Dict(zip(cols, vals)) == Dict(df.q_of_slot[v] => 1.0, df.q_of_slot[df.lower_slot[v]] => -1.0)
+    end
+    @test reproduction_error(df, WING_G, linear_field) < 1e-12
     @test_throws ArgumentError build_dofmap(WING_G; opts=DOFMapOptions(tip_kutta=:none))
 end
 
@@ -135,7 +143,9 @@ end
         mesh.nodes[v] = MeshLibrary.Point(p + SVector(0.0, 0.3dy, 0.0))
     end
     g = build_geometry(mesh)
-    dm = build_dofmap(g)
+    dz = build_dofmap(g) # by default the shared tip nodes' copies are tied, so nothing is shed at the tips
+    @test count(==(:tip), dz.constraint) == 2 && iszero(dz.K[1, :]) && iszero(dz.K[34, :])
+    dm = build_dofmap(g; opts=DOFMapOptions(tip_kutta=:free))
     @test length(g.kutta.pair_chains) == 1
     @test count(>(0), dm.lower_slot) == 2 # only the shared tip nodes are duplicated
     @test size(dm.K, 1) == 34 && dm.wake_te.lines == [collect(1:34)]
@@ -169,7 +179,7 @@ end
     dm = build_dofmap(g)
     @test count(==(:tjunction), dm.constraint) == length(g.tjunctions) == 6
     @test count(==(:gap), dm.constraint) == 4 # the two interior nodes of one side of each 3-edge slit
-    @test dm.nq == dm.nslot - 10
+    @test count(==(:tip), dm.constraint) == 2 && dm.nq == dm.nslot - 12
     @test size(dm.K, 1) == 18
     check_row_sums(dm)
     grad = norm(SVector(1.7, -0.9, 2.3))

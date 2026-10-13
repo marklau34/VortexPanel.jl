@@ -4,13 +4,14 @@
 #
 #   julia -t auto --project=validation validation/wing/run_wing.jl [levels=1,2,3]
 #
-# 1. Convergence of the capped wing (the default: caps, wake along the freestream to 20 spans) with Richardson
-#    extrapolation, the tip loading, cond₁ and timings.
-# 2. Tip treatments: caps (their corners at the trailing edge's end node on the upper or the lower copy), zipped and
-#    open tips. The solver models no filaments on the body (a filament on a test triangle's edge makes the Galerkin
-#    integral diverge), so zipped and open tips leave their boundary vorticity out.
+# 1. Convergence of the capped wing (the defaults: caps, the zero-tip Kutta condition, wake along the freestream to 20
+#    spans) with Richardson extrapolation, cond₁ and timings.
+# 2. Tip treatments: caps with the zero-tip or the free tip Kutta condition (with free tips, the caps' corners at the
+#    trailing edge's end node take the upper or the lower copy), zipped and open tips. The solver models no filaments on
+#    the body (a filament on a test triangle's edge makes the Galerkin integral diverge), so zipped and open tips leave
+#    their boundary vorticity out.
 # 3. Wake options: bisector first row, wake length, semi-infinite strips, first row, growth.
-# 4. Quadrature sensitivity, and zero lift at α = 0 (the tips' up-down asymmetry shows there).
+# 4. Quadrature sensitivity, and zero lift at α = 0.
 # 5. Abused meshes: the MESA smoke set (jitter, slivers, gaps, T-junctions, spanwise skew, misaligned and non-matching
 #    trailing edges) and all at once.
 # 6. MESA's baseline next to ours (validation/output/morino/summary.csv, when it exists).
@@ -95,11 +96,12 @@ function main(args=ARGS)
     lv = levels[1:min(end, 2)]
     println("\n2. Tip treatments")
     print_header()
-    for l in lv, (name, kw) in (("cap, upper copy", (;)), ("cap, lower copy", (dofmap=DOFMapOptions(cap_te_copy=:lower),)),
+    for l in lv, (name, kw) in (("cap, zero tip", (;)), ("cap, free tip", (dofmap=DOFMapOptions(tip_kutta=:free),)),
+        ("cap, free tip, lower copy", (dofmap=DOFMapOptions(tip_kutta=:free, cap_te_copy=:lower),)),
         ("zip", (geometry=GeometryOptions(openings=:zip),)), ("open", (geometry=GeometryOptions(openings=:open),)))
-        r = name == "cap, upper copy" ? conv[l] : solve_wing(wing(l); α=ALPHA, kw...)
+        r = name == "cap, zero tip" ? conv[l] : solve_wing(wing(l); α=ALPHA, kw...)
         print_row("L$l $name", r)
-        name == "cap, upper copy" || push!(rows, row(name, l, r))
+        name == "cap, zero tip" || push!(rows, row(name, l, r))
     end
 
     println("\n3. Wake options (L$(lv[end]))")
@@ -125,6 +127,9 @@ function main(args=ARGS)
         print_row("L$l α = 0", r)
         @printf("  L%d at α = 0: |μ_w| at most %.2e (at a tip: %.2e)\n", l, maximum(abs, r.μ_w), abs(r.μ_w[first(r.dm.wake_te.lines[1])]))
         push!(rows, row("alpha 0", l, r))
+        f = solve_wing(wing(l); α=0.0, dofmap=DOFMapOptions(tip_kutta=:free)) # the caps' up-down asymmetry shows here
+        print_row("L$l α = 0, free tip", f)
+        push!(rows, row("alpha 0; free tip", l, f))
     end
 
     println("\n5. Abused meshes (seed 1), lift change from the clean mesh")

@@ -6,8 +6,8 @@
 #   julia -t auto --project=validation validation/comparison/run_comparison.jl [levels=1,2,3]
 #
 # 1. Refinement on clean meshes: CL (pressure and Kutta–Joukowski), CDi (pressure and Trefftz) and Cm about c/4, with
-#    Richardson extrapolation, our zero-tip Kutta variant (tip_kutta = :zero), and the condition number (raw, and with
-#    the rows scaled by the diagonal) and wall-clock time at matched resolution.
+#    Richardson extrapolation, the free-tip Kutta variant (tip_kutta = :free; the default is :zero), and the condition
+#    number (raw, and with the rows scaled by the diagonal) and wall-clock time at matched resolution.
 # 2. Refinement by direction from the L2 mesh, chordwise (19-152 panels per surface at 34 strips) and spanwise (17-136
 #    strips at 38 panels): where each code's error comes from, and an estimate at infinite resolution.
 # 3. The two-dimensional limit: the midspan section's cl and cm at aspect ratios 15.5, 31 and 62 (68 strips, the
@@ -38,7 +38,7 @@ include(joinpath(@__DIR__, "..", "common", "svgplot.jl"))
 const OUTDIR = joinpath(@__DIR__, "..", "output", "comparison")
 const AR0 = WING_SPAN / WING_CHORD
 const QUANTITIES = (:CL, :CL_KJ, :CDi_p, :CDi_T, :Cm_c4)
-const CODES = [(:ours, "Galerkin"), (:zero, "Galerkin, zero tip"), (:mesa, "MESA (Morino)")]
+const CODES = [(:ours, "Galerkin"), (:free, "Galerkin, free tip"), (:mesa, "MESA (Morino)")]
 const CODE_LABEL = Dict(CODES)
 const CHORD_STUDY = [19, 38, 76, 152] # panels per surface, at 34 strips
 const SPAN_STUDY = [17, 34, 68, 136]  # strips, at 38 panels per surface
@@ -60,16 +60,6 @@ function parse_args(args)
 end
 
 pct(a, b) = 100 * (a / b - 1)
-
-"""
-Richardson extrapolation of three values on meshes refined by 2 each time: the observed order and the extrapolated value,
-NaN unless the order is at least 0.3 (below it the values are not in the asymptotic range, and 1/(2^p - 1) amplifies
-their differences more than threefold)
-"""
-function extrapolate(vals)
-    p, e = richardson(vals)
-    return p, (isfinite(p) && p >= 0.3 ? e : NaN)
-end
 
 """The exception's type and the MESA, PAGE or VortexPanel function it came from, when found"""
 function error_line(e, bt)
@@ -140,15 +130,15 @@ end
 ours_clean_split(mesh, pattern; kw...) = ours_wing(mesh; geometry=GeometryOptions(split=:pattern, split_pattern=pattern), kw...)
 
 """
-The clean reference wing with `nspan` strips and `nchord` panels per surface solved by each of `codes` (:ours, :zero
-for our zero-tip variant, :mesa), as a Dict
+The clean reference wing with `nspan` strips and `nchord` panels per surface solved by each of `codes` (:ours with the
+solver's defaults, :free for the free-tip Kutta variant, :mesa), as a Dict
 """
 function clean_wing(nspan::Integer, nchord::Integer, codes; jacobi::Bool=false)
     w = reference_wing(1; split_te=false, nspan=nspan, nchord=nchord)
     out = Dict{Symbol,Any}()
     for code in codes
         r, err = code == :mesa ? mesa_wing(w; nspan=nspan, nchord=nchord) :
-                 ours_wing(w; jacobi=jacobi && code == :ours, dofmap=DOFMapOptions(tip_kutta=code == :zero ? :zero : :free))
+                 ours_wing(w; jacobi=jacobi && code == :ours, dofmap=code == :free ? DOFMapOptions(tip_kutta=:free) : DOFMapOptions())
         isnothing(r) && error("$(CODE_LABEL[code]) failed on the clean $nspan × $nchord wing: $err")
         out[code] = r
         GC.gc()
@@ -262,7 +252,7 @@ function directions(res)
         end
     end
     println("  Our pressure minus circulation lift under spanwise refinement, in all and from the outer 5% of the span (|η| ≥ 0.95)")
-    for code in (:ours, :zero), n in SPAN_STUDY
+    for code in (:ours, :free), n in SPAN_STUDY
         @printf("  %-20s %6d %+9.5f %+9.5f\n", CODE_LABEL[code], n, lift_gap(study[(:span, n)][code])...)
     end
     println("  Estimate at infinite resolution, Q(∞, ∞) ≈ Q(34, ∞) + Q(∞, 38) - Q(34, 38) (the errors of the two directions add;")
@@ -292,36 +282,12 @@ end
 # ---------------------------------------------------------------------------------------------------------------------
 # 3. the two-dimensional limit
 
-"""The structured strips at the middle of the span: the two either side of the middle station (an even number of strips) or the middle one"""
-middle_strips(n::Integer) = iseven(n) ? (n ÷ 2, n ÷ 2 + 1) : (n ÷ 2 + 1,)
-
-"""Midspan section of our solution: cl from pressure and from μ_w at the middle, and cm about c/4"""
-function ours_midspan(r)
-    ld = r.load
-    n = length(ld.s0)
-    ks = middle_strips(n)
-    line = r.dm.wake_te.lines[1]
-    nodes = iseven(n) ? (line[n÷2+1],) : (line[n÷2+1], line[n÷2+2])
-    y_first = r.dm.wake_te.x[line[1]][2]
-    y0, y1 = y_first + ld.s0[ks[1]], y_first + ld.s1[ks[end]]
-    M = 0.0
-    for (el, c) in zip(r.els, r.cp)
-        y0 <= el.centroid[2] <= y1 || continue
-        M += cross(el.centroid - SVector(0.25WING_CHORD, el.centroid[2], 0.0), -c * el.area * el.n)[2]
-    end
-    return (cl_p=sum(ld.lift_p[j] for j in ks) / length(ks) / WING_CHORD,
-        cl_kj=2 * sum(r.μ_w[k] for k in nodes) / length(nodes) / norm(r.V) / WING_CHORD, cm=M / (WING_CHORD^2 * (y1 - y0)))
-end
-
 """Midspan section of MESA's solution"""
 function mesa_midspan(r, nspan)
     ks = middle_strips(nspan)
     mean(f) = sum(f(j) for j in ks) / length(ks)
     return (cl_p=mean(j -> r.spanwise[j, 4]), cl_kj=mean(j -> r.spanwise[j, 7]) * 2 / (VINF * WING_CHORD), cm=mean(j -> r.cm_strip[j]))
 end
-
-"""Value at 1/AR = 0 of the quadratic in 1/AR through three points"""
-extrapolate_ar(ar, v) = (hcat(ones(3), 1 ./ ar, 1 ./ ar .^ 2) \ v)[1]
 
 """Section of PAGE's chordwise spacing (cosine, clustered at the leading edge only), n panels per surface, for the 2-D method"""
 function page_section(n::Integer; t::Real=WING_THICKNESS)
@@ -348,7 +314,7 @@ function two_d_limit(levels)
             w = reference_wing(1; split_te=false, nspan=nspan, nchord=nchord, span=b)
             o, erro = ours_wing(w; span=b)
             isnothing(o) && error("Galerkin failed on the AR $(AR0 * m) wing: $erro")
-            om = ours_midspan(o)
+            om = midspan_section(o)
             to = o.t_assembly + o.t_solve
             o = nothing
             GC.gc()
@@ -400,9 +366,9 @@ end
 
 function pressure_and_loading(res, ex, level)
     println("\n4. Chordwise Cp and spanwise loading (L$level)")
-    o, z, m = res[(:ours, level)], res[(:zero, level)], res[(:mesa, level)]
+    o, fr, m = res[(:ours, level)], res[(:free, level)], res[(:mesa, level)]
     nspan, _ = reference_wing_size(level)
-    cl_mid = ours_midspan(o).cl_p
+    cl_mid = midspan_section(o).cl_p
     αe = ALPHA_DEG * cl_mid / ex.cl_gamma # the section's lift is nearly linear in α
     for _ in 1:3
         αe *= cl_mid / panel2d(naca00_section(400), αe).cl_gamma
@@ -413,18 +379,18 @@ function pressure_and_loading(res, ex, level)
     low2d = [(p[1], c) for (p, c) in zip(sec.x, sec.cp) if p[2] < 0]
     for η in CP_STATIONS
         up, low = chordwise_cp(o, level, η)
-        zu, zl = chordwise_cp(z, level, η)
+        fu, fl = chordwise_cp(fr, level, η)
         mu, ml, mx = interp_stations(m.η, m.cp_up, η), interp_stations(m.η, m.cp_low, η), interp_stations(m.η, m.xc_up, η)
         writedlm(joinpath(OUTDIR, @sprintf("cp_L%d_eta%.2f.csv", level, η)), vcat(["code" "x_c" "cp" "surface"],
             hcat(fill("Galerkin", size(up, 1) + size(low, 1)), vcat(up, low)),
-            hcat(fill("Galerkin, zero tip", size(zu, 1) + size(zl, 1)), vcat(zu, zl)),
+            hcat(fill("Galerkin, free tip", size(fu, 1) + size(fl, 1)), vcat(fu, fl)),
             hcat(fill("MESA", 2length(mx)), [mx; mx], [mu; ml], [fill(1, length(mx)); fill(-1, length(mx))])), ',')
         series = Any[(x=up[:, 1], y=-up[:, 2], label="Galerkin", color=SVG_COLORS[1], marker=false),
             (x=low[:, 1], y=-low[:, 2], label="", color=SVG_COLORS[1], marker=false),
             (x=mx, y=-mu, label="MESA", color=SVG_COLORS[3], dash=true, marker=false), (x=mx, y=-ml, label="", color=SVG_COLORS[3], dash=true, marker=false)]
         if η >= 0.9
-            push!(series, (x=zu[:, 1], y=-zu[:, 2], label="Galerkin, zero tip", color=SVG_COLORS[2], marker=false))
-            push!(series, (x=zl[:, 1], y=-zl[:, 2], label="", color=SVG_COLORS[2], marker=false))
+            push!(series, (x=fu[:, 1], y=-fu[:, 2], label="Galerkin, free tip", color=SVG_COLORS[2], marker=false))
+            push!(series, (x=fl[:, 1], y=-fl[:, 2], label="", color=SVG_COLORS[2], marker=false))
         end
         if η == 0.0
             push!(series, (x=first.(up2d), y=-last.(up2d), label=@sprintf("2-D section at cl %.3f", cl_mid), color="#52514e", marker=false))
@@ -437,12 +403,12 @@ function pressure_and_loading(res, ex, level)
     sp = m.spanwise
     writedlm(joinpath(OUTDIR, "spanwise_L$level.csv"), vcat(["code" "eta" "cl_kj" "cl_p"],
         hcat(fill("Galerkin", length(o.load.s0)), η_of(o.load), o.load.lift_kj / WING_CHORD, o.load.lift_p / WING_CHORD),
-        hcat(fill("Galerkin, zero tip", length(z.load.s0)), η_of(z.load), z.load.lift_kj / WING_CHORD, z.load.lift_p / WING_CHORD),
+        hcat(fill("Galerkin, free tip", length(fr.load.s0)), η_of(fr.load), fr.load.lift_kj / WING_CHORD, fr.load.lift_p / WING_CHORD),
         hcat(fill("MESA", size(sp, 1)), sp[:, 1], sp[:, 7] * 2 / (VINF * WING_CHORD), sp[:, 4])), ',')
     svgplot(joinpath(OUTDIR, "spanwise_L$level.svg"); title="Spanwise loading, L$level", xlabel="η = 2y/b", ylabel="sectional cl", ylims=(0.0, 0.5),
         series=[(x=η_of(o.load), y=o.load.lift_kj / WING_CHORD, label="Galerkin, circulation", color=SVG_COLORS[1], marker=false),
             (x=η_of(o.load), y=o.load.lift_p / WING_CHORD, label="Galerkin, pressure", color=SVG_COLORS[1], dash=true, marker=false),
-            (x=η_of(z.load), y=z.load.lift_kj / WING_CHORD, label="Galerkin zero tip, circulation", color=SVG_COLORS[2], marker=false),
+            (x=η_of(fr.load), y=fr.load.lift_kj / WING_CHORD, label="Galerkin free tip, circulation", color=SVG_COLORS[2], marker=false),
             (x=sp[:, 1], y=sp[:, 7] * 2 / (VINF * WING_CHORD), label="MESA, circulation", color=SVG_COLORS[3], marker=false),
             (x=sp[:, 1], y=sp[:, 4], label="MESA, pressure", color=SVG_COLORS[3], dash=true, marker=false)])
 end
@@ -568,16 +534,16 @@ function zero_incidence(level)
     cases = ["clean" => base, "TE misaligned 0.3, shared" => skew(:te_misaligned, 0.3; shared_te=true),
         "TE misaligned 0.3, non-matching" => skew(:te_misaligned, 0.3; shared_te=false), "lean opposite 0.3" => skew(:lean_opposite, 0.3),
         "lean opposite 0.3, TE rows" => skew(:lean_opposite, 0.3; te_rows=true), "jitter independent 0.3" => skew(:jitter_independent, 0.3)]
-    @printf("%-34s %12s %12s %12s %12s   %s\n", "mesh", "Galerkin CL", "max |μ_w|", "zero tip CL", "max |μ_w|", "MESA CL")
+    @printf("%-34s %12s %12s %12s %12s   %s\n", "mesh", "Galerkin CL", "max |μ_w|", "free tip CL", "max |μ_w|", "MESA CL")
     rows = Any[]
     for (name, mesh) in cases
         o, _ = ours_wing(mesh; α=0.0)
-        z, _ = ours_wing(mesh; α=0.0, dofmap=DOFMapOptions(tip_kutta=:zero))
+        fr, _ = ours_wing(mesh; α=0.0, dofmap=DOFMapOptions(tip_kutta=:free))
         m, why = mesa_wing(mesh; nspan=nspan, nchord=nchord, alpha=0.0)
-        @printf("%-34s %12.2e %12.2e %12.2e %12.2e   %s\n", name, o.CL, maximum(abs, o.μ_w), z.CL, maximum(abs, z.μ_w), isnothing(m) ? why : @sprintf("%.2e", m.CL))
-        push!(rows, [name o.CL maximum(abs, o.μ_w) z.CL maximum(abs, z.μ_w) (isnothing(m) ? NaN : m.CL)])
+        @printf("%-34s %12.2e %12.2e %12.2e %12.2e   %s\n", name, o.CL, maximum(abs, o.μ_w), fr.CL, maximum(abs, fr.μ_w), isnothing(m) ? why : @sprintf("%.2e", m.CL))
+        push!(rows, [name o.CL maximum(abs, o.μ_w) fr.CL maximum(abs, fr.μ_w) (isnothing(m) ? NaN : m.CL)])
     end
-    writedlm(joinpath(OUTDIR, "zero_incidence.csv"), vcat(["mesh" "ours_CL" "ours_max_mu_w" "ours_zero_tip_CL" "ours_zero_tip_max_mu_w" "mesa_CL"], reduce(vcat, rows)), ',')
+    writedlm(joinpath(OUTDIR, "zero_incidence.csv"), vcat(["mesh" "ours_CL" "ours_max_mu_w" "ours_free_tip_CL" "ours_free_tip_max_mu_w" "mesa_CL"], reduce(vcat, rows)), ',')
 end
 
 function robustness(res, levels)

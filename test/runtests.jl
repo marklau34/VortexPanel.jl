@@ -33,4 +33,5 @@ include(joinpath(@__DIR__, "helpers.jl"))
     @testset "Force routes" include("post/test_forces.jl")
     @testset "Wing (validation stage 5)" include("assembly/test_wing.jl")
     @testset "Two-dimensional section (validation stage 6)" include("assembly/test_section2d.jl")
+    @testset "Test weights (validation stage 8)" include("assembly/test_test_weights.jl")
 end

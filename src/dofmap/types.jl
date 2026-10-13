@@ -1,17 +1,19 @@
 """
-    DOFMapOptions(; cap_te_copy=:upper, tip_kutta=:free)
+    DOFMapOptions(; cap_te_copy=:upper, tip_kutta=:zero)
 
+- `tip_kutta`: `:zero` (default) ties the lower copies of the trailing edge's end nodes (the tips) to the upper ones, so
+  μ_w = 0 at the tips: the Kutta condition at the tip corner, where the continuous loading vanishes, with no tip
+  filament in the wake and no jump at the cap seam. `:free` applies the nodal Kutta condition at the tips like
+  everywhere else and leaves μ_w there to the solution, which settles on a nonzero value that shrinks only slowly under
+  refinement (validation stages 5 and 6).
 - `cap_te_copy`: which copy of a duplicated trailing edge node the cap triangles touching it use, `:upper` or `:lower`.
-  The cap meets both surfaces at the tip's trailing edge node, so it can only be continuous with one of them; the
-  jump μ_u - μ_l to the other runs as a filament along the cap's seam with that surface (doc §4 and §7, "wake tips").
-- `tip_kutta`: `:free` applies the nodal Kutta condition at the trailing edge's end nodes (the tips) like everywhere
-  else, leaving μ_w there to the solution; `:zero` ties their lower copies to the upper ones, so μ_w = 0 at the tips:
-  the Kutta condition at the tip corner (where the continuous loading vanishes), with no tip filament in the wake and
-  no jump at the cap seam.
+  It matters only with `tip_kutta = :free`: the cap meets both surfaces at the tip's trailing edge node, so it can then
+  be continuous with only one of them, and the jump μ_u - μ_l to the other runs as a filament along the cap's seam
+  with that surface (doc §4 and §7, "wake tips"), which the solver leaves out.
 """
 Base.@kwdef struct DOFMapOptions
     cap_te_copy::Symbol = :upper
-    tip_kutta::Symbol = :free
+    tip_kutta::Symbol = :zero
 end
 
 function check_options(opts::DOFMapOptions)

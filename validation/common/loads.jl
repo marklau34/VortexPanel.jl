@@ -77,6 +77,17 @@ function richardson(vals::AbstractVector)
 end
 
 """
+    extrapolate(vals; min_order=0.3)
+
+`richardson`, with the extrapolated value NaN unless the observed order is at least `min_order`: below it the values
+are not in the asymptotic range, and 1/(2^p - 1) amplifies their differences more than threefold.
+"""
+function extrapolate(vals::AbstractVector; min_order::Real=0.3)
+    p, e = richardson(vals)
+    return p, (isfinite(p) && p >= min_order ? e : NaN)
+end
+
+"""
     structured_strip(e, nspan, nchord)
 
 Spanwise strip of element `e` of a PAGE wing mesh (upper surface elements first, chordwise index fastest, strips in

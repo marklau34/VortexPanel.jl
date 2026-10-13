@@ -81,6 +81,35 @@ function chordwise_cp(r, level::Integer, η::Real; nspan::Integer=reference_wing
     return reduce(vcat, [[x cp 1] for (x, cp) in up]), reduce(vcat, [[x cp -1] for (x, cp) in low])
 end
 
+"""The structured strips at the middle of the span: the two either side of the middle station (an even count) or the middle one"""
+middle_strips(n::Integer) = iseven(n) ? (n ÷ 2, n ÷ 2 + 1) : (n ÷ 2 + 1,)
+
+"""
+    midspan_section(r)
+
+Midspan section of a `solve_wing` solution: its lift coefficient from pressure (the middle strips) and from μ_w at the
+middle of the trailing edge (Kutta–Joukowski), and its moment coefficient about the quarter chord.
+"""
+function midspan_section(r)
+    ld = r.load
+    n = length(ld.s0)
+    ks = middle_strips(n)
+    line = r.dm.wake_te.lines[1]
+    nodes = iseven(n) ? (line[n÷2+1],) : (line[n÷2+1], line[n÷2+2])
+    y_first = r.dm.wake_te.x[line[1]][2]
+    y0, y1 = y_first + ld.s0[ks[1]], y_first + ld.s1[ks[end]]
+    M = 0.0
+    for (el, c) in zip(r.els, r.cp)
+        y0 <= el.centroid[2] <= y1 || continue
+        M += cross(el.centroid - SVector(0.25WING_CHORD, el.centroid[2], 0.0), -c * el.area * el.n)[2]
+    end
+    return (cl_p=sum(ld.lift_p[j] for j in ks) / length(ks) / WING_CHORD,
+        cl_kj=2 * sum(r.μ_w[k] for k in nodes) / length(nodes) / norm(r.V) / WING_CHORD, cm=M / (WING_CHORD^2 * (y1 - y0)))
+end
+
+"""Value at 1/AR = 0 of the quadratic in 1/AR through three points (the two-dimensional limit of a sectional value)"""
+extrapolate_ar(ar, v) = (hcat(ones(3), 1 ./ ar, 1 ./ ar .^ 2) \ v)[1]
+
 """
     abused_wings(level; seed=1)
 
