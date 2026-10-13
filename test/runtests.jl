@@ -11,6 +11,7 @@ using VortexPanel.MeshTools
 const G = VortexPanel.Geometry
 
 include(joinpath(@__DIR__, "..", "validation", "common", "reference_wing.jl"))
+include(joinpath(@__DIR__, "..", "validation", "common", "exact_flows.jl"))
 include(joinpath(@__DIR__, "helpers.jl"))
 
 @testset "VortexPanel" begin
@@ -22,6 +23,7 @@ include(joinpath(@__DIR__, "helpers.jl"))
     @testset "DOF map" include("dofmap/test_dofmap.jl")
     @testset "Kernels" include("kernels/test_kernels.jl")
     @testset "Elements" include("elements/test_elements.jl")
-    @testset "Contact quadrature" include("assembly/test_contact.jl")
+    @testset "Touching and contact quadrature" include("assembly/test_contact.jl")
     @testset "Sphere (validation stage 3)" include("assembly/test_sphere.jl")
+    @testset "Ellipsoids (validation stage 4)" include("assembly/test_ellipsoid.jl")
 end

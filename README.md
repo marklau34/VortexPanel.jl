@@ -6,14 +6,14 @@ The design is in `Plan Galerkin Linear-Vortex Panel Solver (Rigid Wake Phase).md
 
 ## Status
 
-Steps 1–4 are done, through validation stage 3 (the sphere in uniform flow). They cover:
+Steps 1–4 are done, through validation stage 4 (ellipsoids in uniform flow). They cover:
 
 - **`VortexPanel.Geometry`** (step 1): turns surface meshes of quads and triangles into a closed, outward, classified triangulation. It welds nodes, splits quads, detects T-junctions, gaps and non-matching trailing edges, and caps open tips without adding nodes. It also detects Kutta edges and reports mesh quality.
-- **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges.
+- **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges. Jitter moves each node by up to δ times its clearance, its smallest height over an edge of an incident element, so elements skew without collapsing.
 - **MESA baseline** (step 1): a rigid-wake baseline on the reference wing family.
 - **`VortexPanel.DOFMap`** (step 2): the constraint matrix C, with μ_slots = C q, and the nodal Kutta rows K, with μ_w = K q.
 - **`VortexPanel.Kernels`** (step 3): the velocity of a unit-strength source triangle, w = (1/4π)∫(x−y)/|x−y|³ dA, the one kernel of the method (sources σw, vortex sheets γ×w).
-- **`VortexPanel.Elements`, `Assembly`, `Post`** (step 4): the flat-triangle element and quadrature tiers, the Galerkin assembly with the bordered dense solve, and surface velocity, Cp and leak. Validated on the sphere in uniform flow (validation stage 3).
+- **`VortexPanel.Elements`, `Assembly`, `Post`** (step 4): the flat-triangle element and quadrature tiers, the Galerkin assembly with the bordered dense solve, and surface velocity, Cp and leak. Validated on the sphere (validation stage 3) and on ellipsoids (stage 4) in uniform flow, on clean and abused meshes.
 
 Not yet built: wake geometry and the lifting solve, forces (pressure, Kutta–Joukowski, Trefftz), the isoparametric quad element.
 
@@ -28,7 +28,8 @@ src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts) -> A, b (tiers i
 src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
-validation/      reference wing, MESA baseline, geometry report (own environment)
+validation/      reference wing, MESA baseline, geometry report, sphere and ellipsoid studies (own environment);
+                 common/exact_flows.jl: the exact ellipsoid flow; common/closed_body.jl: the closed-body study tables
 ```
 
 ## Environments
@@ -49,6 +50,7 @@ julia -t auto --project=validation validation/morino_baseline/smoke_abuse.jl # M
 julia --project=validation validation/geometry/report_geometry.jl            # geometry and DOF map tables, and VTK
 julia --project=validation validation/kernels/compare_ase.jl                 # source kernel against AeroSingularityElements
 julia -t auto --project=validation validation/sphere/run_sphere.jl           # validation stage 3: sphere in uniform flow
+julia -t auto --project=validation validation/ellipsoid/run_ellipsoid.jl     # validation stage 4: ellipsoids in uniform flow
 ```
 
 Outputs go to `validation/output/`, which is not tracked:
@@ -56,7 +58,8 @@ Outputs go to `validation/output/`, which is not tracked:
 - `morino/summary.csv`, which records the git SHAs of the checkouts;
 - spanwise loading, Cp and trailing-edge μ CSVs, and VTK;
 - `geometry/*.vtu` with a geometry report CSV;
-- `sphere/` convergence (clean and jittered), abused-mesh, quadrature-sensitivity and test-weight CSVs, and VTK of the finest icosphere and the fully abused icosphere 3 (Cp, μ, leak, their exact values and the μ error).
+- `sphere/` convergence (clean and jittered), abused-mesh, quadrature-sensitivity and test-weight CSVs, and VTK of the finest icosphere and the fully abused icosphere 3 (Cp, μ, leak, their exact values and the μ error);
+- `ellipsoid/` the exact-solution checks, convergence, abused-mesh and quadrature-sensitivity CSVs, Cp along the cut y = 0 of the triaxial body, and VTK of the finest triaxial, prolate and thin oblate meshes and the fully abused triaxial one.
 
 ## Geometry conventions (used by the later steps)
 
@@ -126,17 +129,21 @@ sol = solve_galerkin(dm, A, b)               # q, μ = C q, λ, cond
 - *Far:* beyond `far_ratio = 3` diameters, a 3-point rule.
 - *Near:* a 7-point rule on sub-triangles, split while they are within 1.5 of their size of the source triangle.
 - *Touching (self, shared edge, shared vertex):* collapsed-coordinate rules graded toward the singular entity. These are hp-graded, with 6 levels of ratio 0.15 and the Gauss order rising from 3 by one per level, so the log-singular integrals converge exponentially.
+  - *Wide corners:* the vertex rule's angular coordinate runs linearly along the opposite edge, so it under-samples the middle of a wide corner. Its error is 5e-9 at 90°, 2e-6 at 120° and 4e-4 at 150°.
+  - A shared corner wider than 90° is therefore split by rays into equal angles of at most `corner_angle = 75°`, each piece carrying the vertex rule (3e-8 at 150°).
+  - Stretched meshes, such as a scaled sphere with panels of aspect ratio 6, have many corners near 150°.
 - *Contact:* triangles that touch beyond their shared nodes. This covers part of an edge at a T-junction, a hanging node, a gap, and a sliver's short edge, all within `contact_rel = 0.1` of the smaller diameter.
-  - The test triangle is split at the source triangle's corners that lie on its edges. Each piece is graded toward its own contact, an edge or a corner.
+  - The test triangle is split at the source triangle's corners that lie on its edges. Each piece is graded toward its own contact: an edge when exactly two of its corners and the middle of the edge between them are on the source, otherwise a corner. A piece with contacts at several corners takes the self rule, graded toward all three edges.
   - Against adaptive cubature, a T-junction pair block is accurate to 3–5e-8; the shared corner's vertex rule alone gives 7–8e-3.
   - Across a slit of 1% or 0.1% of the edge length it is accurate to 3–4e-8. The near rule degrades as the slit narrows.
+  - Near contacts are integrated as accurately as the regular tiers: on the ellipsoids, the column defects do not change with `contact_rel` from 0.1 to 0.5 (up to 34,000 contact pairs).
   - Clean meshes have no contact pairs, so their matrices are unchanged.
 
 **Diagnostics** (`consistency(dm, A, b)` and `solve_galerkin`):
 - **Row sums of A** vanish exactly.
 - **Column sums of A·C** vanish for exact integration. An unknown's basis function is continuous through T-junctions and stitches, so its sheet has no net flux through a closed surface. Their relative defect therefore measures the quadrature. At a gap the flux through the slit adds O(ε log ε): about 3e-2 for slits of 1% of the edge length.
 - **λ** absorbs the incompatibility of the right-hand side and shrinks as the quadrature is refined.
-  - On a jittered icosphere 3 it is 1e-9 with the defaults and 1e-11 with the reference quadrature. A gap's slit flux shows up as about 1e-6.
+  - On icosphere 3 with jitter and T-junctions it is 6e-10 with the defaults and 8e-12 with the reference quadrature. A gap's slit flux shows up as about 1e-6.
   - On centrally symmetric meshes, such as the plain icosphere and cube-sphere, λ vanishes to rounding whatever the quadrature. The quadrature defects are even under x → −x while σ and V∞·n are odd, so they cancel.
   - λ is a single number and can be small by cancellation. The column-sum defect is the per-unknown check.
 - **Leak:** the normal velocity at centroids, O(h) because facet normals are piecewise constant.
@@ -149,7 +156,7 @@ The exact solution is μ = V∞·x/2 and Cp = 1 − (9/4)sin²θ. The runs below
 |---|---|---|---|---|---|---|---|
 | icosphere 4 | 2562 | 1.4e-4 | 4.9e-4 | 4.6e-3 | 1.9e-2 | 9.9e-3 | 2.6e3 |
 | cube-sphere 24 (split quads) | 3458 | 1.4e-4 | 1.0e-3 | 1.2e-2 | 1.8e-2 | 9.9e-3 | 3.5e3 |
-| icosphere 4, jittered | 2562 | 5.2e-4 | 2.3e-3 | 1.8e-2 | 2.4e-2 | 1.1e-2 | 2.6e3 |
+| icosphere 4, jittered | 2562 | 4.4e-4 | 2.0e-3 | 1.6e-2 | 2.3e-2 | 1.1e-2 | 2.6e3 |
 | cube-sphere 24, jittered | 3458 | 3.9e-4 | 1.8e-3 | 1.6e-2 | 2.1e-2 | 1.0e-2 | 3.5e3 |
 
 - **Orders of convergence:** μ converges at second order: 1.8–2.3 on clean meshes and 1.9–2.1 on jittered ones. Cp and leak converge at first order. The two velocity routes agree to O(h).
@@ -161,14 +168,62 @@ The exact solution is μ = V∞·x/2 and Cp = 1 − (9/4)sin²θ. The runs below
 | abuse | μ L2 | μ max | Cp L2 (∇μ) | λ | column defect | Δμ from quadrature |
 |---|---|---|---|---|---|---|
 | clean | 5.8e-4 | 1.9e-3 | 9.8e-3 | 1e-19 | 3.5e-6 | 1.9e-5 |
-| jitter 0.3 | 2.0e-3 | 8.0e-3 | 3.5e-2 | 9e-10 | 6.8e-6 | 1.0e-5 |
+| jitter 0.3 | 1.7e-3 | 6.8e-3 | 2.9e-2 | 5e-10 | 7.0e-6 | 1.2e-5 |
 | 10 slivers at 5% | 2.2e-3 | 2.1e-2 | 5.5e-2 | 7e-10 | 4.3e-6 | 1.9e-5 |
 | 6 gaps of 1% | 6.2e-4 | 1.9e-3 | 9.9e-3 | 6e-7 | 3.3e-2 (slit flux) | 1.9e-5 |
 | 12 T-junctions | 5.8e-4 | 1.9e-3 | 1.0e-2 | 5e-11 | 4.7e-6 | 1.9e-5 |
-| all at once | 3.1e-3 | 1.9e-2 | 6.6e-2 | 9e-7 | 2.2e-2 (slit flux) | 9.8e-6 |
+| all at once | 2.9e-3 | 1.9e-2 | 6.1e-2 | 9e-7 | 2.2e-2 (slit flux) | 1.2e-5 |
 
 - **Robustness:** every variant solves as one closed body, with cond₁ between 640 and 650. The cube-sphere 12 results are similar.
 - **T-junctions and gaps** cost no accuracy. The constraints reproduce the linear μ, and the contact tier integrates the touching pairs.
 - **Before the contact tier,** T-junction pairs got the shared corner's vertex rule. The column defect was then 2.3e-3, and refining the rules only brought it to 1e-3.
 - **Jitter** raises the error constant about 3× but keeps the order.
 - **Slivers** cost accuracy locally, for two reasons. Needle facets on a curved surface have tilted normals (6° against 0.6°), and short edges amplify nodal errors in ∇μ. The change of μ falls about 10× from a sliver's neighbours to two rings away. The local error converges under refinement, and the conditioning is unchanged.
+
+## Ellipsoids in uniform flow (validation stage 4)
+
+**Exact solution** (Lamb, *Hydrodynamics* §114), in `validation/common/exact_flows.jl`:
+- The depolarization factors are αᵢ = abc∫₀^∞ dλ/((aᵢ²+λ)Δ(λ)). They come from Carlson's R_D, computed to rounding, and sum to 2.
+- On the surface the perturbation potential stays linear: μ = Σ αᵢ/(2−αᵢ) V∞ᵢ xᵢ.
+- The surface velocity is the tangential part of the constant vector k, with kᵢ = 2V∞ᵢ/(2−αᵢ). So Cp = 1 − |k − (k·n)n|²/|V∞|² follows the curvature.
+- The tests check these formulas against the exterior potential, computed from the ellipsoidal coordinate. The two agree on the surface, and the exterior potential meets the Neumann condition and Laplace's equation to finite-difference accuracy and decays like a dipole.
+
+**Bodies and meshes.** All bodies use the generic V∞ of the sphere study:
+- a triaxial ellipsoid 2 : 1 : 0.5;
+- a slender prolate spheroid 6 : 1 : 1;
+- thin oblate spheroids 1 : 1 : 0.2 and 1 : 1 : 0.1.
+
+The meshes are scaled unit spheres, so the prolate carries panels of aspect ratio up to 6 with corners near 150°, and the thinner oblate has a rim of curvature radius 0.01. From `validation/ellipsoid/run_ellipsoid.jl` (μ relative to its largest exact value):
+
+| body, mesh | nodes | μ L2 | μ max | Cp L2 (∇μ) | Cp max (∇μ) | Cp L2 (sums) | leak rms | cond₁ |
+|---|---|---|---|---|---|---|---|---|
+| triaxial, icosphere 4 | 2562 | 1.4e-4 | 7.6e-4 | 2.2e-3 | 2.7e-2 | 8.7e-3 | 6.9e-3 | 2.7e3 |
+| triaxial, icosphere 4 jittered | 2562 | 3.7e-4 | 3.6e-3 | 6.5e-3 | 1.4e-1 | 1.0e-2 | 7.3e-3 | 2.7e3 |
+| triaxial, cube-sphere 24 | 3458 | 1.6e-4 | 2.4e-3 | 1.0e-2 | 7.0e-2 | 9.8e-3 | 7.8e-3 | 3.6e3 |
+| triaxial, latitude-longitude 48×96 | 4514 | 1.9e-4 | 2.4e-3 | 9.5e-3 | 7.0e-2 | 9.7e-3 | 7.8e-3 | 4.8e3 |
+| prolate 6:1:1, icosphere 4 | 2562 | 1.5e-4 | 1.2e-3 | 1.8e-3 | 3.9e-2 | 6.9e-3 | 5.9e-3 | 2.7e3 |
+| oblate 1:1:0.2, icosphere 4 | 2562 | 1.4e-4 | 8.8e-4 | 2.9e-3 | 4.1e-2 | 1.4e-2 | 8.1e-3 | 2.8e3 |
+| oblate 1:1:0.1, icosphere 4 | 2562 | 1.4e-4 | 1.5e-3 | 5.5e-3 | 9.3e-2 | 2.9e-2 | 9.7e-3 | 2.9e3 |
+
+- **Orders of convergence:** μ is second order on every body and mesh family, 2.0–2.2 between the two finest levels, including the pole fans of the latitude-longitude spheres and the jittered meshes. Cp and leak are first order.
+- **Cp along the cut y = 0** of the finest triaxial mesh matches the exact value at the centroids to 2.7e-2 (gradient) and 3.7e-2 (sums); `cp_cut_y0.csv` has the curves.
+- **Quadrature error:** on icosphere 3 the default quadrature changes μ by 1.6–2.8e-5, against a discretization error (max) of 2.7–5.5e-3. The column defects are 2.6–6.8e-6, as on the sphere, and the reference quadrature reaches 4e-9 to 4e-8.
+- **Wide-corner split:** without it (`corner_angle = 180`), the column defect of the prolate and the thin oblate is 10× larger (3.9e-5 and 6.5e-5), and even the reference quadrature stalls at about 2e-6.
+- **Cost:** a 2,562-node assembly takes 1–1.5 s; 4,514 nodes take 2.8 s.
+
+**Abused meshes** (triaxial body, icosphere 3, seed 7, moved nodes put back on the surface along the ray from the centre):
+
+| abuse | μ L2 | μ max | Cp L2 (∇μ) | λ | column defect | Δμ from quadrature |
+|---|---|---|---|---|---|---|
+| clean | 5.8e-4 | 2.7e-3 | 4.6e-3 | 1e-19 | 4.8e-6 | 1.6e-5 |
+| jitter 0.3 | 1.5e-3 | 1.3e-2 | 1.4e-2 | 1e-10 | 4.7e-6 | 1.7e-5 |
+| 10 slivers at 5% | 2.0e-3 | 1.9e-2 | 1.7e-2 | 1e-10 | 3.8e-6 | 1.9e-5 |
+| 6 gaps of 1% | 7.3e-4 | 3.7e-3 | 4.6e-3 | 4e-7 | 5.3e-2 (slit flux) | 1.6e-5 |
+| 12 T-junctions | 5.8e-4 | 2.7e-3 | 4.7e-3 | 5e-11 | 4.8e-6 | 1.7e-5 |
+| all at once | 2.8e-3 | 3.4e-2 | 2.4e-2 | 3e-7 | 2.3e-2 (slit flux) | 1.7e-5 |
+
+- **Robustness:** every variant solves as one closed body, with cond₁ between 670 and 680. The cube-sphere 12 results are similar.
+- **T-junctions** cost nothing, gaps 27% in μ L2, jitter 2.6× and slivers 3.5×.
+- **All at once:** a sliver on the stretched, jittered mesh leaves a facet tilted 25° from the surface. The largest μ error grows 12× and the L2 error 5×.
+- **Jitter bound:** jitter was first bounded by each node's shortest edge. On these stretched meshes that collapsed obtuse triangles to 176°, leaving facets tilted 31° with Cp errors of order one there. It is now bounded by the node's clearance; the sphere's jittered results above improved by about 15%.
+- **Cp max error on jittered meshes** (0.14 at 2,562 nodes) comes from the gradient route on irregular triangles, as on the sphere. Its L2 converges at first order.

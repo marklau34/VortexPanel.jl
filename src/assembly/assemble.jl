@@ -10,7 +10,9 @@ Quadrature tiers, on the test triangle (the source triangle's integral is the an
 - near: `near_points`-point rule on sub-triangles of the test triangle, split in four while closer to the source
   triangle than `near_ratio` times their size, up to `near_depth` levels;
 - touching (self, shared edge, shared vertex): rules graded toward the singular entity with `touch_levels` levels of
-  ratio `touch_ratio` and Gauss orders growing from `touch_order` by one per level away from the singularity;
+  ratio `touch_ratio` and Gauss orders growing from `touch_order` by one per level away from the singularity. A shared
+  corner wider than 90° is split by rays from it into equal angles of at most `corner_angle` degrees, each piece
+  carrying the vertex rule (`vertex_pieces!`);
 - contact: triangles that touch beyond their shared nodes, within `contact_rel` times the smaller diameter (across a
   T-junction, a gap or a sliver): the test triangle is split at the source triangle's corners on its edges and each
   piece is graded toward its own contact (`contact_rule`).
@@ -26,6 +28,7 @@ Base.@kwdef struct AssemblyOptions
     touch_levels::Int = 6
     touch_ratio::Float64 = 0.15
     touch_order::Int = 3
+    corner_angle::Float64 = 75.0
     contact_rel::Float64 = 0.1
     kernel_far::Float64 = FAR_DEFAULT
     threaded::Bool = true
@@ -79,6 +82,40 @@ function append_piece!(λs, ws, r::BaryRule, b, frac)
         push!(ws, w * frac)
     end
     return nothing
+end
+
+"""
+    vertex_pieces!(λs, ws, p, k, base, b, frac, corner_angle)
+
+Append the vertex rule `base` (graded toward its corner 1) toward corner k of the piece with physical corners p,
+barycentric corners b and area fraction frac. The rule's angular coordinate runs linearly along the opposite edge,
+which leaves the middle of a wide corner under-sampled (5e-4 relative error at 150°, 2e-6 at 120°, 5e-9 at 90°), so
+a corner wider than 90° is split by rays from it into equal angles of at most `corner_angle` degrees. The rays divide
+the opposite edge in the ratio of the areas, |p_i - p_k| sin φ : |p_j - p_k| sin(θ - φ).
+"""
+function vertex_pieces!(λs, ws, p, k::Integer, base::BaryRule, b, frac, corner_angle::Real)
+    i, j = mod1(k + 1, 3), mod1(k + 2, 3)
+    u, v = p[i] - p[k], p[j] - p[k]
+    θ = acos(clamp(dot(u, v) / (norm(u) * norm(v)), -1.0, 1.0))
+    if θ <= π / 2
+        return append_piece!(λs, ws, base, (b[k], b[i], b[j]), frac)
+    end
+    m = ceil(Int, rad2deg(θ) / corner_angle)
+    ts = [0.0; [(φ = θ * q / m; norm(u) * sin(φ) / (norm(u) * sin(φ) + norm(v) * sin(θ - φ))) for q in 1:m-1]; 1.0]
+    for q in 1:m
+        b1, b2 = (1 - ts[q]) * b[i] + ts[q] * b[j], (1 - ts[q+1]) * b[i] + ts[q+1] * b[j]
+        append_piece!(λs, ws, base, (b[k], b1, b2), frac * (ts[q+1] - ts[q]))
+    end
+    return nothing
+end
+
+"""Vertex rule toward corner k of T (the stored rotation unless the corner is wider than 90°)"""
+function vertex_rule(T::FlatTriangle, k::Integer, rules::TierRules, opts::AssemblyOptions)
+    u, v = T.x[mod1(k + 1, 3)] - T.x[k], T.x[mod1(k + 2, 3)] - T.x[k]
+    dot(u, v) >= 0 && return rules.vertex[k]
+    λs, ws = SVector{3,Float64}[], Float64[]
+    vertex_pieces!(λs, ws, T.x, k, rules.vertex[1], CORNERS, 1.0, opts.corner_angle)
+    return BaryRule(λs, ws)
 end
 
 """Append the near rule (`near_rule`) on the piece of T with barycentric corners b and area fraction frac"""
@@ -138,10 +175,12 @@ reach(el::FlatTriangle) = max(norm(el.x[1] - el.centroid), norm(el.x[2] - el.cen
 Rule on test triangle T for a source triangle S that touches it beyond the corners they share (`shared[k]`: T's
 corner k is a node of S): along part of an edge across a T-junction, at a hanging node, across a gap or past a sliver.
 The singular set is then not a whole edge or a corner of T, so T is split at the corners of S that lie on its edges,
-and every piece carries the rule graded toward its own contact with S: an edge (`rules.edge`) when both ends and the
-middle of one of its edges are on S, a corner (`rules.vertex`) when one corner is, the near rule when none is, and a
-split in four when several separate corners are. A point is on S within `opts.contact_rel` times the smaller
-diameter, so near contacts (a gap's width) are graded too. Returns nothing when S touches T at shared corners only.
+and every piece carries the rule graded toward its own contact with S: an edge (`rules.edge`) when exactly two corners
+and the middle of the edge between them are on S, a corner (`vertex_pieces!`) when one corner is, the near rule when
+none is, and otherwise (two corners not joined by a contact edge, or all three, where an edge rule would miss the
+singularity at the third) the self rule, graded toward all three edges and their ends. A point is on S within
+`opts.contact_rel` times the smaller diameter, so near contacts (a gap's width) are graded too. Returns nothing when S
+touches T at shared corners only.
 """
 function contact_rule(T::FlatTriangle, S::FlatTriangle, shared::NTuple{3,Bool}, rules::TierRules, opts::AssemblyOptions)
     tol = opts.contact_rel * min(T.diam, S.diam)
@@ -169,19 +208,17 @@ function contact_pieces!(λs, ws, T::FlatTriangle, S::FlatTriangle, rules::TierR
         end
     end
     on = map(x -> distance_to(S, x) <= tol, p)
-    for k in 1:3
-        k1 = mod1(k + 1, 3)
-        on[k] && on[k1] && distance_to(S, (p[k] + p[k1]) / 2) <= tol && return append_piece!(λs, ws, rules.edge[k], b, frac)
-    end
     nc = count(on)
+    if nc == 2 # the edge from corner k to k + 1 joins the two corners on S
+        k = !on[3] ? 1 : !on[1] ? 2 : 3
+        distance_to(S, (p[k] + p[mod1(k + 1, 3)]) / 2) <= tol && return append_piece!(λs, ws, rules.edge[k], b, frac)
+    end
     if nc == 1
-        append_piece!(λs, ws, rules.vertex[findfirst(on)], b, frac)
-    elseif nc == 0 || level >= 4
+        vertex_pieces!(λs, ws, p, findfirst(on), rules.vertex[1], b, frac, opts.corner_angle)
+    elseif nc == 0
         near_pieces!(λs, ws, T, S, rules.near, opts.near_ratio, opts.near_depth, b, frac, 0)
-    else # separate contacts at several corners
-        for sub in quarters(b)
-            contact_pieces!(λs, ws, T, S, rules, opts, tol, sub, frac / 4, level + 1)
-        end
+    else # contacts at several corners, not along one edge
+        append_piece!(λs, ws, rules.self, b, frac)
     end
     return nothing
 end
@@ -224,7 +261,7 @@ function pair_rule(g::SurfaceGeometry, els, t::Integer, s::Integer, tri, rules::
     if ns == 2 # the shared edge, from corner k to k + 1
         return 2, rules.edge[shared[1] && shared[2] ? 1 : shared[2] && shared[3] ? 2 : 3]
     elseif ns == 1
-        return 3, rules.vertex[findfirst(shared)]
+        return 3, vertex_rule(T, findfirst(shared), rules, opts)
     end
     depth = (t, s) in touch_geo ? opts.near_depth + 4 : opts.near_depth
     return 5, near_rule(T, S, rules.near, opts.near_ratio, depth)

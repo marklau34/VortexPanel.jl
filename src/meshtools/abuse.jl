@@ -83,10 +83,22 @@ function default_avoid(mesh::MeshLibrary.Mesh)
     return avoid
 end
 
-"""Unit normal at every node (area-weighted face normals) and the shortest incident edge"""
+"""Distance from p to the segment from a to b"""
+function segment_distance(p, a, b)
+    e = b - a
+    t = clamp(dot(p - a, e) / max(dot(e, e), eps()), 0, 1)
+    return norm(p - (a + t * e))
+end
+
+"""
+Unit normal at every node (area-weighted face normals), the shortest incident edge, and the clearance: the smallest
+distance from the node to an edge of an incident element that does not touch it (a triangle's height over the
+opposite edge), which is at most the shortest incident edge and far less at the wide corner of a cap.
+"""
 function node_frames(X, faces)
     n = [zero(SVector{3,eltype(eltype(X))}) for _ in X]
     ℓ = fill(eltype(eltype(X))(Inf), length(X))
+    clearance = fill(eltype(eltype(X))(Inf), length(X))
     for f in faces
         m = length(f)
         a = cross(X[f[2]] - X[f[1]], X[f[3]] - X[f[1]])
@@ -97,9 +109,13 @@ function node_frames(X, faces)
             L = norm(X[w] - X[v])
             ℓ[v] = min(ℓ[v], L)
             ℓ[w] = min(ℓ[w], L)
+            for j in 1:m # the edges of f that do not touch v
+                (j == k || mod1(j + 1, m) == k) && continue
+                clearance[v] = min(clearance[v], segment_distance(X[v], X[f[j]], X[f[mod1(j + 1, m)]]))
+            end
         end
     end
-    return [norm(v) > 0 ? normalize(v) : v for v in n], ℓ
+    return [norm(v) > 0 ? normalize(v) : v for v in n], ℓ, clearance
 end
 
 """Closest point to p on the triangles (quads split 1-3) of `faces` among `cand`"""
@@ -149,14 +165,16 @@ end
 """
     jitter_nodes(mesh, δ; rng, project=nothing, fixed=default_fixed(mesh))
 
-Move every free node tangentially in a random direction by up to δ times its shortest incident edge, then back onto the
-surface: onto `project(p)` when given (e.g. `naca_projector` for an exact wing), else onto the original faceted
-surface around the node.
+Move every free node tangentially in a random direction by up to δ times its clearance (its smallest height over an
+edge of an incident element, see `node_frames`), then back onto the surface: onto `project(p)` when given (e.g.
+`naca_projector` for an exact wing), else onto the original faceted surface around the node. Bounding the move by the
+clearance rather than the shortest edge skews elements without collapsing them: to first order an element's area
+changes by at most 3δ of itself, so none folds over for δ < 1/3, also at the wide corners of anisotropic meshes.
 """
 function jitter_nodes(mesh::MeshLibrary.Mesh, δ::Real; rng::AbstractRNG=StableRNG(1), project=nothing, fixed=default_fixed(mesh))
     X = coords(mesh)
     faces = elem_nodes(mesh)
-    normals, ℓ = node_frames(X, faces)
+    normals, _, ℓ = node_frames(X, faces)
     nel = node_elements(length(X), faces)
     Y = copy(X)
     log = AbuseLog()
@@ -169,7 +187,7 @@ function jitter_nodes(mesh::MeshLibrary.Mesh, δ::Real; rng::AbstractRNG=StableR
         p = X[v] + δ * ℓ[v] * rand(rng) * (cos(θ) * t1 + sin(θ) * t2)
         Y[v] = isnothing(project) ? project_on_faces(p, X, faces, nel[v]) : project(p)
     end
-    record!(log, :jittered_nodes, "jittered $(length(X) - length(fixed)) nodes by up to $δ of their shortest edge"; n=count(v -> !(v in fixed), eachindex(X)))
+    record!(log, :jittered_nodes, "jittered $(length(X) - length(fixed)) nodes by up to $δ of their clearance"; n=count(v -> !(v in fixed), eachindex(X)))
     return with_nodes(mesh, Y), log
 end
 

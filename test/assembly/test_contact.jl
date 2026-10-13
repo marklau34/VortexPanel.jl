@@ -1,9 +1,9 @@
-# The contact tier: test and source triangles that touch beyond their shared nodes (T-junctions, gaps, slivers),
-# against adaptive cubature over the test triangle.
+# The touching tier's wide corners and the contact tier (test and source triangles that touch beyond their shared
+# nodes: T-junctions, gaps, slivers), against adaptive cubature over the test triangle.
 
 using HCubature
 using VortexPanel.Elements
-using VortexPanel.Assembly: contact_rule, tier_rules, pair_block, near_rule
+using VortexPanel.Assembly: contact_rule, tier_rules, pair_block, near_rule, vertex_rule
 
 """The pair block ∫ψ_a n_T·(γ_b × w_S) dA by adaptive cubature: (u, v) ↦ λ = (1-u, u(1-v), uv), dA = 2A u du dv"""
 function block_cubature(T, S; rtol=1e-10)
@@ -29,8 +29,9 @@ const TSHORT = FlatTriangle(TH, TA, SVector(0.2, 0.7cosd(20), 0.7sind(20)))
 
 @testset "pieces" begin
     r = contact_rule(TLONG, TSHORT, shared_corners(TLONG, TSHORT), RULES, OPTS)
-    # split at h: the piece along a-h carries the edge rule, the piece h-b-c the corner rule toward h
-    @test length(r) == length(RULES.edge[1]) + length(RULES.vertex[1])
+    # split at h: the piece along a-h carries the edge rule, the piece h-b-c the corner rule toward h, in two parts as
+    # that corner is 94° wide
+    @test length(r) == length(RULES.edge[1]) + 2 * length(RULES.vertex[1])
     @test sum(r.w) ≈ 1
     @test all(l -> all(>=(-1e-15), l) && sum(l) ≈ 1, r.λ)
     for (p, q, s) in ((1, 0, 0), (2, 1, 0), (1, 1, 1), (3, 0, 2))
@@ -38,9 +39,10 @@ const TSHORT = FlatTriangle(TH, TA, SVector(0.2, 0.7cosd(20), 0.7sind(20)))
     end
     # the reverse pair: S's whole edge h-a lies on T's long edge, so S takes the edge rule unsplit
     @test length(contact_rule(TSHORT, TLONG, shared_corners(TSHORT, TLONG), RULES, OPTS)) == length(RULES.edge[1])
-    # a point contact: S touches T's long edge at the hanging node only
+    # a point contact: S touches T's long edge at the hanging node only; both pieces carry the corner rule toward h,
+    # the one with the 94° corner in two parts
     point_contact = FlatTriangle(TH, SVector(0.3, 0.5, 0.1), SVector(0.7, 0.5, 0.1))
-    @test length(contact_rule(TLONG, point_contact, shared_corners(TLONG, point_contact), RULES, OPTS)) == 2 * length(RULES.vertex[1])
+    @test length(contact_rule(TLONG, point_contact, shared_corners(TLONG, point_contact), RULES, OPTS)) == 3 * length(RULES.vertex[1])
     # regular neighbours (a shared edge, a shared corner) and distant triangles need no contact rule
     for S in (FlatTriangle(TB, TA, SVector(0.4, 0.7, 0.2)), FlatTriangle(TB, SVector(1.6, 0.4, 0.0), SVector(1.2, 0.8, 0.1)),
         FlatTriangle(SVector(0.0, 0.0, 2.0), SVector(1.0, 0.0, 2.0), SVector(0.5, 1.0, 2.0)))
@@ -63,4 +65,32 @@ end
         @test relative_error(TLONG, S, contact_rule(TLONG, S, shared_corners(TLONG, S), RULES, OPTS), ref) < 1e-6
         @test relative_error(TLONG, S, near_rule(TLONG, S, RULES.near, OPTS.near_ratio, OPTS.near_depth), ref) > 1e-4
     end
+end
+
+@testset "wide corners" begin
+    # T's corner at the origin is 150° wide and S shares it beyond a 20° gap. The vertex rule's angular coordinate
+    # runs linearly along the opposite edge and under-samples the middle of a wide corner; in two equal angles it is
+    # as accurate as on a narrow corner
+    dir(φ) = SVector(cosd(φ), sind(φ), 0.0)
+    T = FlatTriangle(TA, dir(-75), dir(75))
+    S = FlatTriangle(TA, 0.9 * dir(95) + SVector(0, 0, 0.1), 1.1 * dir(145) + SVector(0, 0, 0.2))
+    ref = block_cubature(T, S)
+    rule = vertex_rule(T, 1, RULES, OPTS)
+    @test length(rule) == 2 * length(RULES.vertex[1])
+    @test sum(rule.w) ≈ 1
+    @test relative_error(T, S, rule, ref) < 1e-7
+    @test relative_error(T, S, RULES.vertex[1], ref) > 1e-4
+    # corners up to 90° keep the stored rule
+    @test vertex_rule(FlatTriangle(TA, dir(-45), dir(45)), 1, RULES, OPTS) === RULES.vertex[1]
+    @test length(vertex_rule(FlatTriangle(TA, dir(-85), dir(85)), 1, RULES, OPTS)) == 3 * length(RULES.vertex[1]) # 170°: three pieces
+end
+
+@testset "several contacts" begin
+    # a needle sharing S's corner a and lying along S's edge a-b, its other corners within the tolerance of that edge:
+    # no single edge or corner of T carries the singular set, so T takes the self rule, graded toward all its edges
+    S = FlatTriangle(TA, TB, SVector(0.5, 0.8, 0.0))
+    T = FlatTriangle(TA, SVector(0.3, -0.05, 0.0), SVector(0.6, -0.03, 0.0))
+    r = contact_rule(T, S, shared_corners(T, S), RULES, OPTS)
+    @test length(r) == length(RULES.self)
+    @test relative_error(T, S, r, block_cubature(T, S)) < 1e-6
 end
