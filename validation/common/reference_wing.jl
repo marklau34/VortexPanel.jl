@@ -15,19 +15,19 @@ spacings nest exactly, so every node of a level is a node of the next.
 reference_wing_size(level::Integer) = (17 * 2^(level - 1), 19 * 2^(level - 1))
 
 """
-    reference_wing(level=1; split_te=true, nspan, nchord)
+    reference_wing(level=1; split_te=true, nspan, nchord, span=WING_SPAN)
 
 PAGE mesh of the reference wing with the parameters of `create_simple_wing_surfpan`. All quads, upper surface
 elements first, chordwise index fastest from the leading edge, strips in +y. The tips are open. The trailing edge is
 tagged with the boundary `trailing_edge` and the element sets `trailing_edge_up`/`trailing_edge_low`; with
 `split_te=true` the trailing edge nodes are duplicated and the boundaries `trailing_edge_1`/`trailing_edge_2` added,
-as MESA requires.
+as MESA requires. `span` changes the span (the aspect ratio) and nothing else.
 """
-function reference_wing(level::Integer=1; split_te::Bool=true, nspan::Integer=reference_wing_size(level)[1],
+function reference_wing(level::Integer=1; split_te::Bool=true, nspan::Integer=reference_wing_size(level)[1], span::Real=WING_SPAN,
     nchord::Integer=reference_wing_size(level)[2])
     airfoil = AirfoilNACA4(0.0, 0.0, WING_THICKNESS, :airfoil1)
     airfoils = LinearAirfoilSections([0.0, 1.0], [airfoil, airfoil])
-    rig = ParametricWingRig(posy=LinearSpanInput(WING_SPAN), chord=WING_CHORD, refloc=0.0, translation=SA[0.0, -WING_SPAN/2, 0.0])
+    rig = ParametricWingRig(posy=LinearSpanInput(span), chord=WING_CHORD, refloc=0.0, translation=SA[0.0, -span/2, 0.0])
     wing = ParametricWing(rig, airfoils)
     mesh_params = LiftSurfMeshParams(span_space=CosineFull(), chord_space=CosineHalf(option=:start), nspan=nspan, nchord=nchord)
     te_params = TrailingEdgeParams(te_name="trailing_edge", te_angle=30)

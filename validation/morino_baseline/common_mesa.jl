@@ -15,23 +15,23 @@ const FREESTREAM = ConstantFreestream(SA[VINF, 0.0, 0.0], 0.0, RHO, 1.81e-5, 343
 const WING_REF = WingReference(span=WING_SPAN, chord=WING_CHORD, rho=RHO, vinf=VINF)
 
 """
-    setup_mesa(mesh; wake_len, te_dir=:freestream, vtk_dir=nothing)
+    setup_mesa(mesh; wake_len, te_dir=:freestream, vtk_dir=nothing, alpha=ALPHA_DEG)
 
-MESA solver system for a copy of the body frame `mesh` pitched to `ALPHA_DEG`, in free air, on the CPU, with a rigid
+MESA solver system for a copy of the body frame `mesh` pitched to `alpha` degrees, in free air, on the CPU, with a rigid
 wake. The trailing edge panels (length `TE_LEN`) leave along the freestream (`te_dir=:freestream`) or along the
 trailing edge bisector (`:bisector`, MESA's default); the rigid wake then runs `wake_len` along the freestream.
 Returns the initialized solver system, the component (whose mesh MESA rotates into the global frame) and the loads
 monitor.
 """
-function setup_mesa(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, vtk_dir=nothing)
-    refframes = (MESAFrame(FixedFrame(SA[0.0, 0.0, 0.0], RotY(deg2rad(-ALPHA_DEG), PitchFrame, MESAGlobalFrame))),)
+function setup_mesa(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, vtk_dir=nothing, alpha::Real=ALPHA_DEG)
+    refframes = (MESAFrame(FixedFrame(SA[0.0, 0.0, 0.0], RotY(deg2rad(-alpha), PitchFrame, MESAGlobalFrame))),)
     te_vec = te_dir == :freestream ? SA[1.0, 0.0, 0.0] : te_dir == :bisector ? SA[NaN, NaN, NaN] : error("Unknown te_dir $te_dir")
     comp = SurfacePanelComponent(deepcopy(mesh), PitchFrame; name=:wing, te_len=TE_LEN, te_dir=te_vec)
     loadmon = LoadMon(name=:wing_loads, comp=:wing, frame=MESAGlobalFrame)
     params = MESASettings(ige=false, use_gpu=false, calc_vertsol=true, no_warn=true)
     vis = isnothing(vtk_dir) ? nothing :
         Visualizer(vtks=(VisVTK(:fullmesh, vtk_dir), VisVTK(:fullwake, vtk_dir), VisVTK(:te, vtk_dir)))
-    prob = MESAProblem(params, RigidWake(wake_len=wake_len), (comp,), refframes, FREESTREAM; loads_monitor=(loadmon,), visualizer=vis)
+    prob = MESAProblem(params, MESA.RigidWake(wake_len=wake_len), (comp,), refframes, FREESTREAM; loads_monitor=(loadmon,), visualizer=vis)
     return init(prob), comp, loadmon
 end
 
@@ -62,14 +62,17 @@ function condition_numbers(A::AbstractMatrix)
 end
 
 """
-    mesa_case(mesh; wake_len, te_dir, nspan, nchord, vtk_dir=nothing)
+    mesa_case(mesh; wake_len, te_dir, nspan, nchord, vtk_dir=nothing, ref=WING_REF, alpha=ALPHA_DEG)
 
 Solve one case and extract every quantity of the baseline. `nspan` and `nchord` give the structured layout of the
-PAGE wing (elements appended after it, such as tip caps, belong to no strip).
+PAGE wing (elements appended after it, such as tip caps, belong to no strip); `ref` its reference lengths and the
+freestream (another span for an aspect ratio sweep). Returns the coefficients, the spanwise loading and the sectional
+pitching moment of every strip about its quarter chord (`cm_strip`).
 """
-function mesa_case(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, nspan::Integer, nchord::Integer, vtk_dir=nothing)
-    ref = WING_REF
-    sys, comp, loadmon = setup_mesa(mesh; wake_len=wake_len, te_dir=te_dir, vtk_dir=vtk_dir)
+function mesa_case(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, nspan::Integer, nchord::Integer, vtk_dir=nothing, ref::WingReference=WING_REF,
+    alpha::Real=ALPHA_DEG)
+
+    sys, comp, loadmon = setup_mesa(mesh; wake_len=wake_len, te_dir=te_dir, vtk_dir=vtk_dir, alpha=alpha)
 
     # system matrix, condition number, and a check that it is MESA's system
     A, b, t_asm = rigidwake_system!(sys)
@@ -108,6 +111,14 @@ function mesa_case(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, nspan
     μ_w_strip = zeros(nspan)
     μ_w_strip[te_strip] .= μ_w
     spanwise = hcat(η, (η .* ref.span ./ 2), dy, Fz ./ (ref.qinf * ref.chord .* dy), Fx ./ (ref.qinf * ref.chord .* dy), μ_w_strip, -μ_w_strip)
+    # sectional pitching moment of each strip about its quarter chord (y axis), from the panel forces and the panel
+    # centroids of the rotated mesh, both in the global frame
+    gm = comp.mesh
+    centroid(e) = sum(p -> SVector(p[1], p[2], p[3]), get_coords(gm, gm.elements[e])) / length(get_nodes(gm.elements[e]))
+    cm_strip = map(1:nspan) do j
+        p = R * SA[0.25 * ref.chord, (strip_y[j][1] + strip_y[j][2]) / 2, 0.0]
+        sum(e -> cross(centroid(e) - p, pansys.pan_force[e])[2], findall(==(j), strip)) / (ref.qinf * ref.chord^2 * dy[j])
+    end
 
     # chordwise pressure coefficient per strip, upper and lower surface (body frame x/c of the panel centroids)
     cp = pansys.pan_pres ./ ref.qinf
@@ -118,5 +129,5 @@ function mesa_case(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, nspan
 
     timings = (assembly=t_asm, lu=t_lu, solve=t_solve)
     return (; coeffs..., CL_KJ, CDi_T, alpha=rad2deg(pitch_angle(R)), cond_raw=conds.raw, cond_jacobi=conds.jacobi,
-        check, timings, npan=pansys.npan, spanwise, μ_w=μ_w[order], y_edges, η, cp_up, cp_low, xc_up)
+        check, timings, npan=pansys.npan, spanwise, cm_strip, μ_w=μ_w[order], y_edges, η, cp_up, cp_low, xc_up)
 end

@@ -6,7 +6,7 @@ The design is in `Plan Galerkin Linear-Vortex Panel Solver (Rigid Wake Phase).md
 
 ## Status
 
-Steps 1–5 are done, through validation stage 5 (the reference wing with a rigid wake). They cover:
+Steps 1–5 are done, through validation stage 6 (the comparison with the Morino code). They cover:
 
 - **`VortexPanel.Geometry`** (step 1): turns surface meshes of quads and triangles into a closed, outward, classified triangulation. It welds nodes, splits quads, detects T-junctions, gaps and non-matching trailing edges, and caps open tips without adding nodes. It also detects Kutta edges and reports mesh quality.
 - **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges. Jitter moves each node by up to δ times its clearance, its smallest height over an edge of an incident element, so elements skew without collapsing.
@@ -15,8 +15,9 @@ Steps 1–5 are done, through validation stage 5 (the reference wing with a rigi
 - **`VortexPanel.Kernels`** (step 3): the velocity of a unit-strength source triangle, w = (1/4π)∫(x−y)/|x−y|³ dA, the one kernel of the method (sources σw, vortex sheets γ×w).
 - **`VortexPanel.Elements`, `Assembly`, `Post`** (step 4): the flat-triangle element and quadrature tiers, the Galerkin assembly with the bordered dense solve, and surface velocity, Cp and leak. Validated on the sphere (validation stage 3) and on ellipsoids (stage 4) in uniform flow, on clean and abused meshes.
 - **`VortexPanel.Wake`, lifting assembly and forces** (step 5): rigid wake strips with their tip filaments, the wake's columns in the Galerkin system, and both force routes (pressure integration; Kutta–Joukowski with the Trefftz plane). Validated on the reference wing (stage 5).
+- **Comparison with MESA** (stage 6): both codes on the same meshes, with an exact two-dimensional referee for the section, and the zero-tip Kutta variant (`DOFMapOptions(tip_kutta=:zero)`).
 
-Not yet built: the comparison with the Morino code (stage 6), the isoparametric quad element (stage 7), the test-weight comparison on the wing (stage 8).
+Not yet built: the isoparametric quad element (stage 7), the test-weight comparison on the wing (stage 8).
 
 ## Layout
 
@@ -26,14 +27,16 @@ src/dofmap/      DOFMap: build_dofmap(g; opts) -> DOFMapping (C, K, slots), redu
 src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity, segment_velocity (vortex filament)
 src/elements/    Elements: FlatTriangle (hat basis, γ_b), quadrature rules and tiers (TierRules)
 src/wake/        Wake: build_wake(g, dm, V∞; opts) -> RigidWake (strips, tip filaments), WakeOptions, write_vtk
-src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts, wake) -> A, b (tiers incl. contact_rule); solve_galerkin; consistency
+src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts, wake) -> A, b (tiers incl. contact_rule); bordered_system,
+                 solve_galerkin; consistency
 src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average;
                  pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
-validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid and wing studies (own environment);
-                 common/exact_flows.jl: the exact ellipsoid flow; common/closed_body.jl: the closed-body study tables;
-                 common/wing_case.jl: solve_wing, a wing with its wake and both force routes
+validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid, wing and comparison studies (own
+                 environment); common/exact_flows.jl: the exact ellipsoid flow; common/closed_body.jl: the closed-body
+                 study tables; common/wing_case.jl: solve_wing, a wing with its wake and both force routes;
+                 common/panel2d.jl: the 2-D linear-vortex panel method; common/svgplot.jl: dependency-free SVG plots
 ```
 
 ## Environments
@@ -56,7 +59,13 @@ julia --project=validation validation/kernels/compare_ase.jl                 # s
 julia -t auto --project=validation validation/sphere/run_sphere.jl           # validation stage 3: sphere in uniform flow
 julia -t auto --project=validation validation/ellipsoid/run_ellipsoid.jl     # validation stage 4: ellipsoids in uniform flow
 julia -t auto --project=validation validation/wing/run_wing.jl               # validation stage 5: the wing with a rigid wake
+julia -t auto --project=validation validation/comparison/run_comparison.jl   # validation stage 6: against MESA (~25 min)
+julia -t auto --project=validation validation/examples/abused_wing.jl level=2 abuse=all   # example: abused wing, Cp in VTK
 ```
+
+`abused_wing.jl` solves the clean and an abused reference wing and writes both for ParaView: colour the `*_tris.vtu` files by `Cp`. The `abuse` argument is one of `all`, `jitter`, `slivers`, `gaps`, `tjunctions`, `tjunctions_midspan`, `skew`, `te_misaligned` or `clean`; `count=N` sets how many quads the T-junction abuses split (default 4). The script header lists every exported field.
+
+Hanging nodes cost nothing measurable. At L2, 64 quads split within |η| ≤ 0.2 of midspan leave 128 hanging nodes and change CL by −0.001% (4 and 16 splits: under 1e-4%). The column defect barely moves, from 6.6e-5 to 7.0e-5. MESA fails on all three meshes (`calc_CHTLS_pan!`).
 
 Outputs go to `validation/output/`, which is not tracked:
 
@@ -65,7 +74,9 @@ Outputs go to `validation/output/`, which is not tracked:
 - `geometry/*.vtu` with a geometry report CSV;
 - `sphere/` convergence (clean and jittered), abused-mesh, quadrature-sensitivity and test-weight CSVs, and VTK of the finest icosphere and the fully abused icosphere 3 (Cp, μ, leak, their exact values and the μ error);
 - `ellipsoid/` the exact-solution checks, convergence, abused-mesh and quadrature-sensitivity CSVs, Cp along the cut y = 0 of the triaxial body, and VTK of the finest triaxial, prolate and thin oblate meshes and the fully abused triaxial one;
-- `wing/` a summary CSV of every case, the spanwise loading per level (Γ, sectional lift by both routes), chordwise Cp at η = 0, 0.5, 0.8 and 0.95, and VTK of the body (Cp, μ) and the wake (μ_w, tip filaments).
+- `wing/` a summary CSV of every case, the spanwise loading per level (Γ, sectional lift by both routes), chordwise Cp at η = 0, 0.5, 0.8 and 0.95, and VTK of the body (Cp, μ) and the wake (μ_w, tip filaments);
+- `examples/` the VTK of `abused_wing.jl`: body (Cp, Cp at the nodes, μ, quality), classified edges, wake (μ_w) and tip filaments;
+- `comparison/` CSV tables and SVG plots of every section of the stage-6 study (refinement, refinement by direction, the two-dimensional limit, Cp and spanwise loading, skew, trailing-edge misalignment, zero incidence, robustness), and `provenance.txt` with the codes' git commits.
 
 ## Geometry conventions (used by the later steps)
 
@@ -86,6 +97,7 @@ All topology decisions about the unknowns are made here (design doc §4 and §7)
   - A trailing-edge node whose corners lie on both an upper and a lower surface gets a second slot for its lower copy (`lower_slot[node]`).
   - `corner_slot[t][k]` is the slot of each triangle corner. The Galerkin system is assembled over slots: test functions are rows, and trial functions are columns, followed by one column per wake node.
 - **Cap corners at the tip trailing-edge node** use the upper copy (`DOFMapOptions(cap_te_copy=:upper)`). The jump μ_u − μ_l then runs as a filament along the cap's seam with the lower surface.
+- **Tip Kutta condition:** `DOFMapOptions(tip_kutta=:free)` (default) treats the trailing edge's end nodes like the others, leaving μ_w there to the solution. `:zero` ties each tip's lower copy to its upper one (constraint kind `:tip`), so μ_w = 0 at the tips: no tip filament in the wake and no jump at the cap seam (stage 6 compares the two).
 - **Constraints.** Each constrained slot is an affine combination of other slots, resolved to the unknowns q:
   - **T-junction hanging nodes** are linear along the long edge.
   - **Stitched gaps:** the nodes of the side with more nodes are linear along the coarser side, at their projection.
@@ -268,7 +280,7 @@ The consequences:
 - None of this holds where the tip isn't free: at a root against a wall, fuselage or symmetry plane, at an endplate, or at a winglet that carries the load on.
 
 **The tip filament is a discretization artifact in both codes, of different kinds:**
-- **Ours is avoidable.** μ_w is linear between nodes and the tip node sits on the tip, so the model could go to zero there. But the nodal Kutta condition leaves μ_u − μ_l free at the corner, and the solve settles on a nonzero value. Its share of the peak falls 0.24, 0.17, 0.13 at L1–L3, about ×0.73 per level (roughly h^½). Setting μ_u = μ_l at the tip node, which is the Kutta condition at the corner, would remove both the tip filament and the cap-seam jump. The cost is that a linear ramp from zero under-represents the √d profile on the last strip.
+- **Ours is avoidable.** μ_w is linear between nodes and the tip node sits on the tip, so the model could go to zero there. But the nodal Kutta condition leaves μ_u − μ_l free at the corner, and the solve settles on a nonzero value. Its share of the peak falls 0.24, 0.17, 0.13 at L1–L3, about ×0.73 per level (roughly h^½). Setting μ_u = μ_l at the tip node, which is the Kutta condition at the corner, removes both the tip filament and the cap-seam jump: `DOFMapOptions(tip_kutta=:zero)`, compared in stage 6. The cost is that a linear ramp from zero under-represents the √d profile on the last strip.
 - **MESA's is structural, not a mistake.** Its constant-strength strips form a vortex lattice, with a filament at every strip boundary. The tip filament is the last of these and carries the whole tip-strip strength. That strength represents the loading a finite distance in from the tip (~√(strip width)), and it shrinks as the strip narrows.
 - Both converge with refinement. Our tip variants move CL by 0.2–0.4%, small next to the 3% gap with MESA.
 
@@ -302,7 +314,136 @@ Results from `validation/wing/run_wing.jl`, on MESA's reference wing (NACA 0015,
 - At L2 every case is within 0.26%.
 - Non-matching trailing edges shed the wake from the union of both edges' nodes and change CL by under 0.06%.
 
-**Next to MESA (stage 6 will compare in depth):**
+**Next to MESA** (stage 6 explains the gaps):
 - At L3 with capped tips MESA gives CL 0.3298 and CL_KJ 0.3343. That is 3% below our pressure lift, and its two routes still differ by 1.4% with the KJ value rising under refinement.
 - MESA's Cm about c/4 is +0.005 and ours is about 0.
 - Its CDi (0.0095 pressure, 0.0091 Trefftz) is close to ours.
+- The stage-6 run times the same solves at about half this table's times: 0.56 s, 2.4 s and 18 s for L1–L3.
+
+## Comparison with the Morino code (validation stage 6)
+
+`validation/comparison/run_comparison.jl` solves the same meshes with both codes: the reference wing at α = 5°, the tips closed with our caps (MESA gets them through `add_caps`), and a rigid wake along the freestream to 20 spans. An exact two-dimensional referee judges the section. `validation/common/panel2d.jl` is a linear-vortex panel method (Katz & Plotkin §11.4), second order against the exact Joukowski lift. It gives the NACA 0015 section at 5° cl = 0.61701 and cm about c/4 = −0.00917.
+
+**Refinement**, with (nspan, nchord) = (17, 19)·2^(level−1). "Zero tip" is `DOFMapOptions(tip_kutta=:zero)`:
+
+| level | solver | CL | CL (KJ) | CDi (pressure) | CDi (Trefftz) | Cm c/4 |
+|---|---|---|---|---|---|---|
+| L1 | Galerkin | 0.3442 | 0.3480 | 0.01087 | 0.00942 | −0.0010 |
+| | Galerkin, zero tip | 0.3383 | 0.3418 | 0.01072 | 0.00895 | +0.0012 |
+| | MESA | 0.3287 | 0.3320 | 0.01009 | 0.00853 | +0.0059 |
+| L2 | Galerkin | 0.3413 | 0.3440 | 0.01016 | 0.00953 | −0.0002 |
+| | Galerkin, zero tip | 0.3389 | 0.3415 | 0.01011 | 0.00927 | +0.0007 |
+| | MESA | 0.3284 | 0.3327 | 0.00979 | 0.00885 | +0.0058 |
+| L3 | Galerkin | 0.3405 | 0.3422 | 0.00983 | 0.00959 | −0.0002 |
+| | Galerkin, zero tip | 0.3395 | 0.3411 | 0.00981 | 0.00943 | +0.0002 |
+| | MESA | 0.3298 | 0.3343 | 0.00948 | 0.00910 | +0.0053 |
+
+MESA's lift is not monotone, because its chordwise and spanwise errors have opposite signs (below), so Richardson extrapolation fails for it. Ours extrapolates to CL 0.3402 (p = 1.9), as in stage 5.
+
+**The section explains both gaps.** Take the midspan section of wings of aspect ratio 15.5, 31 and 62 (68 strips each) and extrapolate it quadratically in 1/AR to the infinite wing. Its errors against the exact section are:
+
+| panels per surface | Galerkin cl | Galerkin cm | MESA cl | MESA cm |
+|---|---|---|---|---|
+| 19 | +1.28% | −0.0022 | −5.47% | +0.0055 |
+| 38 | +0.66% | −0.0010 | −3.75% | +0.0045 |
+| 76 | +0.35% | −0.0004 | −2.53% | +0.0033 |
+| observed order | 0.95 | 1.2 | 0.55 | 0.3–0.4 |
+
+- **The codes bracket the exact section.** Ours converges at first order from above, MESA at order 0.5 from below.
+- **Ours is 7× closer in cl and 8× in cm at 76 panels per surface.** MESA's cl error there is what ours has at about 9 panels.
+- **For scale,** the 2-D method itself on PAGE's chordwise spacing is off by −1.02%, −0.48% and −0.22%.
+- **The deficit is in MESA's circulation.** Its Kutta–Joukowski lift has the same deficit as its pressure lift, so the problem is not in its pressure post-processing.
+- **The loading shows it too.** MESA's circulation loading at L2 is 3.8% below ours at midspan, 2.2% below at η = 0.8 and level at η = 0.95.
+
+**Refinement by direction.** Starting from the L2 mesh, the chord is refined at 34 strips (19 to 152 panels per surface) and the span at 38 panels (17 to 136 strips). Richardson extrapolation uses the last three meshes, and only where the observed order is at least 0.3:
+
+| quantity | solver | chordwise limit (order) | spanwise limit (order) | both directions |
+|---|---|---|---|---|
+| CL (KJ) | Galerkin | 0.3407 (1.2) | 0.3441 (1.1) | **0.3407** |
+| | Galerkin, zero tip | 0.3406 (1.1) | 0.3416 (3.8) | **0.3407** |
+| | MESA | 0.3446 (0.54) | 0.3296 (1.5) | **0.3415** |
+| CL | Galerkin | 0.3381 (1.2) | creeps (below) | |
+| | Galerkin, zero tip | 0.3381 (1.2) | creeps | |
+| | MESA | 0.3403 (0.46) | 0.3255 (1.4) | 0.3374 |
+| Cm c/4 | Galerkin | +0.0010 (1.2) | creeps | |
+| | Galerkin, zero tip | +0.0010 (1.5) | creeps | |
+| | MESA | +0.0043 at 152 panels (order 0.25) | +0.0064 (1.1) | |
+
+"Both directions" assumes the errors of the two directions add: Q(∞, ∞) ≈ Q(34, ∞) + Q(∞, 38) − Q(34, 38).
+
+- **Both codes converge to nearly the same lift.** By the circulation route, extrapolated in both directions, both our tip variants give 0.3407 and MESA gives 0.3415, 0.24% apart. MESA's slow chordwise convergence makes its value the less certain one.
+- **The gap at the refinement levels is chordwise, mostly MESA's.** Refining the chord from 19 to 152 panels raises MESA's lift by 3.0% and lowers ours by 2.0%. MESA's Cm falls from +0.0065 to +0.0043 toward ours (+0.0010 in the limit), too slowly to extrapolate.
+- **Why MESA's sequence isn't monotone:** refining its span from 17 to 136 strips lowers its lift by 2.1%, against its chordwise gain.
+- **Cm at L3:** the codes differ by 0.0055 on the wing; their sectional cm errors at 76 panels differ by 0.0038. In span, our Cm falls 0.0007 per doubling of the strips, while MESA's rises by 0.0006, 0.0004 and 0.0002.
+- **Our pressure lift creeps under spanwise refinement:** +0.0009 per doubling of the strips, with Cm −0.0007, while the circulation lift has converged to 3e-5 from 34 strips on.
+  - All of the creep sits in the outer 5% of the span. Pressure lift minus circulation lift there grows from +0.0022 at 17 strips to +0.0049 at 136, as much as the overall difference shrinks.
+  - The cause is the cross-flow around the sharp edge between the wing surface and the flat cap. Its suction is an integrable singularity, which the cosine spanwise spacing keeps resolving. The pressure lift therefore converges, but slowly. The extra lift acts near the trailing edge, where the tip vortex forms.
+  - For wings with sharp tips the circulation route is the reliable one. MESA's pressure lift converges in span (order 1.4).
+- **Induced drag:**
+  - The zero-tip Trefftz drag converges in both directions, to 0.00960.
+  - The default's grows as the strips near the tip narrow: 0.0091 to 0.0101 from 17 to 136 strips. With a nonzero μ_w at the tip, the exact Trefftz integral diverges logarithmically, and the discrete one follows it. MESA's tip strip carries the same kind of filament, and its Trefftz drag creeps too.
+  - The pressure drags reach 0.00956 (zero tip) and 0.00907 (MESA).
+
+**Chordwise Cp** at L2 (`cp_L2_eta*.svg`):
+- The codes agree within 0.017 between 10% and 90% chord at all four stations.
+- Suction peaks agree within 0.02 (−1.225 against MESA's −1.214 at midspan).
+- The largest difference is on the last panel: ours 0.24 upper and 0.26 lower, against MESA's 0.18.
+
+**Skew sensitivity** uses the patterns of MESA's dev study, though both codes run the stock rigid wake here; the dev study used `solve_decoupled`. Changes are from the clean mesh of the same level, over 4 patterns × 4 amplitudes (σ = 0.05–0.3 of the station spacing; for jitter, the mean |Δ| over 5 seeds):
+
+| level | mean (largest) \|ΔCL\|: Galerkin | Galerkin, clean split | MESA | mean \|ΔCDi\|, pressure: Galerkin | MESA | mean \|ΔCm\|: Galerkin | MESA |
+|---|---|---|---|---|---|---|---|
+| L1 | 0.24% (0.64%) | 0.055% (0.23%) | 0.24% (0.65%) | 0.78% | 9.6% | 0.00029 | 0.00018 |
+| L2 | 0.087% (0.26%) | 0.035% (0.12%) | 0.19% (0.94%) | 0.24% | 2.5% | 0.00010 | 0.00024 |
+
+- **Lift, at L2:** ours is 2.1× less sensitive on average and 3.7× in the worst case. With the clean split it is 5.3× and 7.6×.
+- **Lift, at L1:** the codes are level.
+- **Lift, with refinement:** our sensitivity falls 2.7× per level, MESA's 1.3×. Independent jitter is MESA's weak spot: 0.94% at L2 against our 0.07%.
+- **Drag:** our pressure drag is 10–12× less sensitive. Opposite lean at L1 changes MESA's by up to 42%.
+- **Most of our lift sensitivity is triangulation.**
+  - The patterns move the rows next to the trailing edge, and the shortest-diagonal split then flips the diagonals of the trailing-edge row.
+  - Flipping that row alone on the clean mesh changes CL by +0.41%, +0.16% and +0.08% at L1–L3. That is first order, an ordinary discretization difference.
+  - Keeping the clean mesh's diagonals (`GeometryOptions(split=:pattern, split_pattern=...)`, the "clean split" column) isolates the skew itself: 0.055% at L1 and 0.035% at L2.
+- **So the design doc's "much less sensitive" holds for drag, for jitter, and for lift from L2 on.** At L1 the triangulation change alone matches MESA's skew sensitivity.
+
+**Trailing-edge misalignment.** The rows aft of 80% chord are offset by ±δ/2 with a shared trailing edge, or the upper rows by δ with a non-matching one.
+- **Shared trailing edge:** MESA is the less sensitive here. Its lift changes by −0.11% (L1) and −0.07% (L2) at δ = 0.3, and by about 0 at 0.5.
+  - Ours changes by −0.34% and −0.57% at L1, and by −0.14% and −0.23% at L2.
+  - In the worst case that is 5.5× MESA's change at L1 and 3.2× at L2. Ours falls 2.5× per level, MESA's 1.5×. MESA's change passes through zero near δ = 0.5, so a ratio at a single δ there means little.
+  - The cause is again diagonal flips. The shift skews two rows, the first row of the shifted band and the trailing-edge row, and the default split flips one diagonal per strip and surface there: 34 of 646 quads at L1, 68 of 2584 at L2.
+  - With the clean split ours changes by +0.03% to +0.25% at L1 and +0.03% to +0.08% at L2. At L2 that is at parity with MESA: smaller at δ ≤ 0.3, larger at 0.5.
+- **Non-matching trailing edge:** MESA cannot represent one, because its trailing-edge split needs matching facets. It changes our lift by at most 0.06% at L1 and 0.02% at L2.
+
+**Zero incidence (L2):**
+- **Default tips:** our lift is −2e-4 to −4e-4 on every mesh, from the caps' up-down asymmetry.
+- **Zero tip:** −6e-6 on the clean mesh, and at most 8e-5 on the skewed and non-matching ones.
+- **MESA:** 1e-7 on the clean and leaning meshes, but 4.4e-3 under independent jitter, 1.3% of its lift at 5°.
+
+**Robustness**, on MESA's smoke set plus all abuses at once, capped:
+- **Our solver** runs every mesh, within 0.64% (L1) and 0.26% (L2) of the clean lift.
+- **MESA fails on the T-junction mesh,** with a singular least-squares system in its surface gradient (`calc_CHTLS_pan!`). It does run the combined mesh, which also has T-junctions.
+- **MESA cannot represent the non-matching trailing edges.**
+- **Jitter of 0.2** moves MESA's lift by 4.5% (L1) and 1.6% (L2), against our 0.26% and 0.08%.
+
+**Cost and conditioning at matched resolution.** At L3 we have 10,557 unknowns against MESA's 10,636 panels, on 16 threads:
+
+| solver | assembly, L1 / L2 / L3 | factorization and solve | cond₁ | cond₁, rows scaled by the diagonal |
+|---|---|---|---|---|
+| Galerkin | 0.54 / 2.2 / 13.1 s | 0.02 / 0.23 / 5.2 s | 1.1e4 / 4.4e4 / 1.7e5 | 8.6e3 / 2.8e4 / 1.1e5 |
+| MESA | 0.01 / 0.14 / 3.0 s | 0.01 / 0.08 / 3.1 s | 8.1e2 / 3.0e3 / 1.3e4 | the same |
+
+- **Assembly:** ours costs 4.4× MESA's at L3 and 15× at L2. The Galerkin double integrals are the cost, and the near field shrinks relative to the far field as the mesh refines.
+  - The cost also grows with panel aspect ratio: the 76-panel section at AR 62 takes 150 s, against MESA's 6 s.
+- **Conditioning:** both condition numbers grow 4× per level. Ours is 13× MESA's, and still 8.5× with the rows scaled by the diagonal, so it is not a scaling artifact.
+  - Our hypersingular first-kind operator conditions worse than Morino's second-kind one.
+  - A dense LU doesn't care at these sizes. An iterative solver would need a preconditioner.
+- **At equal sectional accuracy,** MESA's cl error at 76 panels per surface is ours at about 9.
+
+**The zero-tip variant** (`DOFMapOptions(tip_kutta=:zero)`, μ_u = μ_l at the tip node):
+- **It converges to the same lift.** The chordwise limits agree to 1e-4: 0.3381 for both in pressure, and 0.3407 against 0.3406 by Kutta–Joukowski. The circulation lift extrapolated in both directions is 0.3407 for both.
+- **It approaches from below,** where the default approaches from above. Their difference shrinks about 2.4× per level: 0.0060, 0.0024, 0.0010.
+- **It removes three defects of the default:**
+  - the up-down asymmetry at α = 0 (6e-6 against −2e-4 at L2);
+  - the tip filament;
+  - the spanwise creep of the Trefftz drag.
+- **At a fixed chordwise resolution the two variants never meet.** However fine the strips, they keep different circulation lifts: 0.3441 and 0.3416 at 38 panels. The tip treatment acts over a region set by the chordwise spacing.

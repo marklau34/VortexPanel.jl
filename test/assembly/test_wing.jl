@@ -20,10 +20,25 @@ end
     wte = R1.dm.wake_te
     @test all(R1.μ_w[k] ≈ R1.sol.μ[v] - R1.sol.μ[R1.dm.lower_slot[v]] for (k, v) in enumerate(wte.node))
     @test R1.columns < 1e-4 && abs(R1.λ) < 1e-8
+    @test 1e3 < R1.cond < 1e5 && isnan(R1.cond_jacobi)
+    rj = solve_wing(WING1; jacobi=true) # the condition number with the rows scaled by the diagonal (validation stage 6)
+    @test rj.CL ≈ R1.CL rtol = 1e-12
+    @test 1e3 < rj.cond_jacobi < R1.cond
     # zero lift at zero incidence; the caps' corners at the trailing edge's end nodes take the upper copy, which
     # breaks the up-down symmetry at the tips a little
     r0 = solve_wing(WING1; α=0.0)
     @test abs(r0.CL) < 1e-3 && maximum(abs, r0.μ_w) < 5e-3
+end
+
+@testset "zero tip Kutta condition" begin
+    z = solve_wing(WING1; dofmap=DOFMapOptions(tip_kutta=:zero))
+    line = z.dm.wake_te.lines[1]
+    @test z.μ_w[first(line)] == 0 && z.μ_w[last(line)] == 0
+    @test abs(z.CL / R1.CL - 1) < 0.03 # level 1: 1.7% below the free tips
+    @test z.columns < 1e-4 && abs(z.λ) < 1e-8
+    # with no jump at the tips the caps' trailing edge corners no longer break the up-down symmetry
+    z0 = solve_wing(WING1; α=0.0, dofmap=DOFMapOptions(tip_kutta=:zero))
+    @test abs(z0.CL) < 2e-5 && maximum(abs, z0.μ_w) < 1e-3
 end
 
 @testset "wake options" begin

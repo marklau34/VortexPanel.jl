@@ -49,49 +49,6 @@ print_header() = @printf("%-38s %6s %9s %9s %10s %10s %9s %7s %9s %9s %9s %7s\n"
 print_row(name, r) = @printf("%-38s %6d %9.5f %9.5f %10.6f %10.6f %9.5f %7.3f %9.1e %9.1e %9.1e %6.1fs\n", name, r.nq, r.CL, r.CL_KJ, r.CDi_p,
     r.CDi_T, r.Cm_c4, r.tip, r.λ, r.columns, r.cond, r.t_assembly + r.t_solve)
 
-"""Abused level `level` wings: the MESA smoke set (validation/morino_baseline/smoke_abuse.jl) and all at once"""
-function abused_wings(level; seed::Integer=1)
-    nspan, nchord = reference_wing_size(level)
-    base = wing(level)
-    project = naca_projector(chord=WING_CHORD, thickness=WING_THICKNESS)
-    rng() = StableRNG(seed)
-    skew(pattern, σ; kw...) = first(skew_wing(base, pattern, σ; nspan=nspan, nchord=nchord, rng=rng(), kw...))
-    return [
-        "jitter 0.2" => first(jitter_nodes(base, 0.2; rng=rng(), project=project)),
-        "slivers (3 nodes, 0.02)" => first(insert_slivers(base, 3, 0.02; rng=rng(), project=project)),
-        "sliver stations (2, 0.02)" => first(sliver_stations(base, 2, 0.02; nspan=nspan, nchord=nchord, rng=rng())),
-        "gaps (3, 0.01)" => first(open_gaps(base, 3, 0.01; rng=rng(), project=project)),
-        "T-junctions (4)" => first(insert_tjunctions(base, 4; rng=rng())),
-        "lean opposite 0.3" => skew(:lean_opposite, 0.3),
-        "jitter independent 0.3" => skew(:jitter_independent, 0.3),
-        "TE misaligned 0.3, shared" => skew(:te_misaligned, 0.3; shared_te=true),
-        "TE misaligned 0.3, non-matching" => skew(:te_misaligned, 0.3; shared_te=false),
-        "lean opposite 0.3, TE rows" => skew(:lean_opposite, 0.3; te_rows=true),
-        "all (jitter, slivers, gaps, T-junctions)" =>
-            first(abuse(base, (jitter=0.2, slivers=(3, 0.02), gaps=(3, 0.01), tjunctions=4, project=project); seed=seed)),
-    ]
-end
-
-"""Chordwise Cp of the triangles of the structured strip nearest the station η (0 root, 1 tip), per parent quad"""
-function chordwise_cp(r, level, η)
-    nspan, nchord = reference_wing_size(level)
-    ys = [WING_SPAN * (-0.5 + (1 - cos(π * j / nspan)) / 2) for j in 0:nspan] # CosineFull stations
-    mids = (ys[1:end-1] + ys[2:end]) / 2
-    j = argmin(abs.(mids .- η * WING_SPAN / 2))
-    rows = Dict{Tuple{Int,Int},Vector{Float64}}() # (chord index, surface) => [area, Cp area, x area]
-    for (t, el) in enumerate(r.els)
-        r.g.tri_kind[t] == VortexPanel.Geometry.BodyTri || continue
-        e = r.g.tri_parent[t]
-        structured_strip(e, nspan, nchord) == j || continue
-        i, side = structured_chord(e, nspan, nchord)
-        acc = get!(rows, (i, side), zeros(3))
-        acc .+= (el.area, el.area * r.cp[t], el.area * el.centroid[1])
-    end
-    data = [(k[1], k[2], v[3] / v[1] / WING_CHORD, v[2] / v[1]) for (k, v) in rows]
-    up = sort([(x, cp) for (i, s, x, cp) in data if s == 1])
-    low = sort([(x, cp) for (i, s, x, cp) in data if s == -1])
-    return reduce(vcat, [[x cp 1] for (x, cp) in up]), reduce(vcat, [[x cp -1] for (x, cp) in low])
-end
 
 """MESA's baseline rows (validation/output/morino/summary.csv), if it exists"""
 function mesa_baseline()

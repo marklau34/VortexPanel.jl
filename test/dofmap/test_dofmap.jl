@@ -57,6 +57,18 @@ end
     @test_throws ArgumentError build_dofmap(g; opts=DOFMapOptions(cap_te_copy=:both))
 end
 
+@testset "zero tip Kutta condition" begin
+    dz = build_dofmap(WING_G; opts=DOFMapOptions(tip_kutta=:zero))
+    tips = findall(==(:tip), dz.constraint)
+    @test sort(tips) == sort([WING_DM.lower_slot[dz.wake_te.node[k]] for k in (1, 18)]) && dz.nq == WING_DM.nq - 2
+    check_row_sums(dz)
+    # the tips' lower copies follow the upper ones: their Kutta rows vanish, the others keep their two entries
+    @test iszero(dz.K[1, :]) && iszero(dz.K[18, :])
+    @test all(nnz(dz.K[k, :]) == 2 for k in 2:17)
+    @test reproduction_error(dz, WING_G, linear_field) < 1e-12
+    @test_throws ArgumentError build_dofmap(WING_G; opts=DOFMapOptions(tip_kutta=:none))
+end
+
 @testset "Galerkin reduction" begin
     dm = WING_DM
     te_of_wake_node = [1, 1, 2, 18]

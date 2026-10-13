@@ -102,6 +102,30 @@ function collect_constraints(g::SurfaceGeometry{T}, corner_slot, lower_slot, log
     return cons, kind
 end
 
+"""
+    tip_constraints!(cons, kind, wake_te, lower_slot, log)
+
+For `tip_kutta = :zero`: tie the lower copy of the trailing edge node at each end of an open trailing edge line (a tip)
+to its upper copy, so μ_u = μ_l there and the Kutta rows give μ_w = 0: the Kutta condition at the tip corner, with no
+tip filament in the wake and no jump at the cap seam.
+"""
+function tip_constraints!(cons::Dict{Int,Vector{Tuple{Int,T}}}, kind, wake_te::WakeTE, lower_slot, log) where {T}
+    for (line, closed) in zip(wake_te.lines, wake_te.closed)
+        closed && continue
+        for k in unique((first(line), last(line)))
+            v = wake_te.node[k]
+            if lower_slot[v] == 0
+                push!(log, "tip trailing edge node $v has no lower copy; its μ_w is left free")
+                continue
+            end
+            haskey(cons, lower_slot[v]) && continue
+            cons[lower_slot[v]] = [(v, one(T))]
+            kind[lower_slot[v]] = :tip
+        end
+    end
+    return cons, kind
+end
+
 struct ConstraintCycle <: Exception
     slot::Int
 end
@@ -154,6 +178,8 @@ function build_dofmap(g::SurfaceGeometry{T}; opts::DOFMapOptions=DOFMapOptions()
     nslot = length(slot_node)
 
     cons, kind = collect_constraints(g, corner_slot, lower_slot, log)
+    wake_te, U, L = wake_trailing_edge(g, corner_slot, nslot, log)
+    opts.tip_kutta == :zero && tip_constraints!(cons, kind, wake_te, lower_slot, log)
     memo = resolve_constraints(T, nslot, cons, kind, log)
     constraint = [get(kind, s, :free) for s in 1:nslot]
     free_slot = findall(==(:free), constraint)
@@ -168,7 +194,6 @@ function build_dofmap(g::SurfaceGeometry{T}; opts::DOFMapOptions=DOFMapOptions()
     end
     C = sparse(I, J, V, nslot, nq)
 
-    wake_te, U, L = wake_trailing_edge(g, corner_slot, nslot, log)
     K = (U - L) * C
     dropzeros!(K)
 

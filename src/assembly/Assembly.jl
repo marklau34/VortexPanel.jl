@@ -13,7 +13,7 @@ using ..Kernels: source_velocity, segment_velocity, FAR_DEFAULT
 using ..Elements
 using ..Wake: RigidWake, nwake
 
-export AssemblyOptions, assemble, source_strengths, solve_galerkin, consistency, near_rule, contact_rule, pair_block
+export AssemblyOptions, assemble, source_strengths, bordered_system, solve_galerkin, consistency, near_rule, contact_rule, pair_block
 
 include("assemble.jl")
 include("solve.jl")

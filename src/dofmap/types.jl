@@ -1,16 +1,22 @@
 """
-    DOFMapOptions(; cap_te_copy=:upper)
+    DOFMapOptions(; cap_te_copy=:upper, tip_kutta=:free)
 
 - `cap_te_copy`: which copy of a duplicated trailing edge node the cap triangles touching it use, `:upper` or `:lower`.
   The cap meets both surfaces at the tip's trailing edge node, so it can only be continuous with one of them; the
   jump μ_u - μ_l to the other runs as a filament along the cap's seam with that surface (doc §4 and §7, "wake tips").
+- `tip_kutta`: `:free` applies the nodal Kutta condition at the trailing edge's end nodes (the tips) like everywhere
+  else, leaving μ_w there to the solution; `:zero` ties their lower copies to the upper ones, so μ_w = 0 at the tips:
+  the Kutta condition at the tip corner (where the continuous loading vanishes), with no tip filament in the wake and
+  no jump at the cap seam.
 """
 Base.@kwdef struct DOFMapOptions
     cap_te_copy::Symbol = :upper
+    tip_kutta::Symbol = :free
 end
 
 function check_options(opts::DOFMapOptions)
     opts.cap_te_copy in (:upper, :lower) || throw(ArgumentError("cap_te_copy must be :upper or :lower, not $(opts.cap_te_copy)"))
+    opts.tip_kutta in (:free, :zero) || throw(ArgumentError("tip_kutta must be :free or :zero, not $(opts.tip_kutta)"))
     return opts
 end
 
@@ -47,8 +53,9 @@ Slots and corners
 
 Constraints and unknowns
 - `constraint[s]` is `:free` for an unknown, or how the slot is constrained: `:tjunction` (a hanging node, linear along
-  the long edge), `:gap` (a node of the finer side of a stitched gap, linear along the coarser side) or `:zip` (a node
-  of one side of a zipped opening, linear along the other side at the same normalised arclength).
+  the long edge), `:gap` (a node of the finer side of a stitched gap, linear along the coarser side), `:zip` (a node
+  of one side of a zipped opening, linear along the other side at the same normalised arclength) or `:tip` (the lower
+  copy of a tip trailing edge node, equal to the upper copy, with `tip_kutta = :zero`).
 - `free_slot[q]` is the slot of unknown q and `q_of_slot[s]` the unknown of a free slot (0 if constrained).
 - `C` (nslot × nq) maps the unknowns to all slots; its rows sum to one.
 

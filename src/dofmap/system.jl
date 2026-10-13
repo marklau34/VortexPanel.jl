@@ -89,8 +89,8 @@ function print_dofmap(io::IO, dm::DOFMapping, g::Union{Nothing,SurfaceGeometry}=
     println(io, "DOF map")
     @printf(io, "  %-22s %d (%d nodes + %d lower trailing edge copies)\n", "slots", dm.nslot, count(s -> s == dm.slot_node[s], 1:dm.nslot),
         count(>(0), dm.lower_slot))
-    @printf(io, "  %-22s %d free; constrained: T-junction %d, gap %d, zip %d\n", "unknowns", dm.nq,
-        count(==(:tjunction), dm.constraint), count(==(:gap), dm.constraint), count(==(:zip), dm.constraint))
+    @printf(io, "  %-22s %d free; constrained: T-junction %d, gap %d, zip %d, tip %d\n", "unknowns", dm.nq,
+        count(==(:tjunction), dm.constraint), count(==(:gap), dm.constraint), count(==(:zip), dm.constraint), count(==(:tip), dm.constraint))
     isnothing(g) || @printf(io, "  %-22s %.3g\n", "max stitch offset", stitch_offset(dm, g))
     if nwake_te(dm.wake_te) == 0
         @printf(io, "  %-22s none\n", "wake trailing edge")
