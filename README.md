@@ -622,7 +622,7 @@ This is the design doc's first deferred item. Its time stepping mirrors MESA's:
 
 The conversion itself follows the design doc, not MESA. It is local to each wake triangle: a triangle's particle comes from its own corner doublets and corners only, and nothing is converted across the interface edge (details below).
 
-`validation/freewake/run_freewake.jl` validates it on the reference wing at α = 5°, started impulsively.
+`validation/freewake/run_freewake.jl` validates it on the reference wing at α = 5°, started impulsively. [docs/free_wake_guide.md](docs/free_wake_guide.md) is a short user guide to the settings: how sensitive the lift is to each, and how to pick the core size, the conversion distance and the trailing-edge panel length.
 
 ```julia
 sim = FreeWakeSim(g, dm, V∞; opts=FreeWakeOptions(dt=0.06, max_rows=10))  # assembles and factors once
