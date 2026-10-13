@@ -17,6 +17,11 @@ Quadrature tiers, on the test triangle (the source triangle's integral is the an
   T-junction, a gap or a sliver): the test triangle is split at the source triangle's corners on its edges and each
   piece is graded toward its own contact (`contact_rule`).
 `kernel_far` is the kernel's own far-field switch (in source triangle diameters).
+
+On isoparametric quads (`MixedMesh`) the same tiers act on the parameter square (`SquareTiers`), with tensor Gauss far
+(2×2 or 3×3) and near (3×3 or 4×4) rules and `quad_touch_levels` levels of grading: their inner integrals are
+numerical (`quad_field`), so each test point costs far more than on a triangle, and four levels already integrate the
+quads' own singular fields as accurately as six (validation stage 7).
 """
 Base.@kwdef struct AssemblyOptions
     test::Symbol = :hat
@@ -31,6 +36,7 @@ Base.@kwdef struct AssemblyOptions
     corner_angle::Float64 = 75.0
     contact_rel::Float64 = 0.1
     kernel_far::Float64 = FAR_DEFAULT
+    quad_touch_levels::Int = 4
     threaded::Bool = true
 end
 
@@ -151,7 +157,7 @@ end
 Elements.distance_to(s::Segment, p::SVector{3}) = first(segment_projection(p, s.a, s.b))
 
 """Parameters along the edges (corner k to k+1) of the piece with corners p at which a corner of S lies, away from the ends"""
-function edge_splits(p, S::FlatTriangle, tol::Real)
+function edge_splits(p, S, tol::Real)
     return ntuple(3) do k
         a, c = p[k], p[mod1(k + 1, 3)]
         L = norm(c - a)
@@ -165,7 +171,7 @@ function edge_splits(p, S::FlatTriangle, tol::Real)
 end
 
 """Whether a corner of S lies on an edge of the triangle with corners p, away from the edge's ends"""
-function splits_an_edge(p, S::FlatTriangle, tol::Real)
+function splits_an_edge(p, S, tol::Real)
     for k in 1:3
         a, c = p[k], p[mod1(k + 1, 3)]
         L = norm(c - a)
@@ -176,9 +182,6 @@ function splits_an_edge(p, S::FlatTriangle, tol::Real)
     end
     return false
 end
-
-"""Largest distance from the centroid to a corner"""
-reach(el::FlatTriangle) = max(norm(el.x[1] - el.centroid), norm(el.x[2] - el.centroid), norm(el.x[3] - el.centroid))
 
 """
     contact_rule(T, S, shared, rules, opts)
@@ -193,7 +196,7 @@ singularity at the third) the self rule, graded toward all three edges and their
 `opts.contact_rel` times the smaller diameter, so near contacts (a gap's width) are graded too. Returns nothing when S
 touches T at shared corners only.
 """
-function contact_rule(T::FlatTriangle, S::FlatTriangle, shared::NTuple{3,Bool}, rules::TierRules, opts::AssemblyOptions)
+function contact_rule(T::FlatTriangle, S, shared::NTuple{3,Bool}, rules::TierRules, opts::AssemblyOptions)
     tol = opts.contact_rel * min(T.diam, S.diam)
     norm(S.centroid - T.centroid) > reach(T) + reach(S) + tol && return nothing
     extra = any(k -> !shared[k] && distance_to(S, T.x[k]) <= tol, 1:3) || splits_an_edge(T.x, S, tol)
@@ -203,7 +206,7 @@ function contact_rule(T::FlatTriangle, S::FlatTriangle, shared::NTuple{3,Bool}, 
     return BaryRule(λs, ws)
 end
 
-function contact_pieces!(λs, ws, T::FlatTriangle, S::FlatTriangle, rules::TierRules, opts::AssemblyOptions, tol::Real, b, frac, level)
+function contact_pieces!(λs, ws, T::FlatTriangle, S, rules::TierRules, opts::AssemblyOptions, tol::Real, b, frac, level)
     p = (point(T, b[1]), point(T, b[2]), point(T, b[3]))
     if level < 4
         splits = edge_splits(p, S, tol)

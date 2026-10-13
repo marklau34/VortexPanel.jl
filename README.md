@@ -6,7 +6,7 @@ The design is in `Plan Galerkin Linear-Vortex Panel Solver (Rigid Wake Phase).md
 
 ## Status
 
-Steps 1–5 are done, with validation stages 1–6 and 8. They cover:
+Steps 1–5 are done, with validation stages 1–8. They cover:
 
 - **`VortexPanel.Geometry`** (step 1): turns surface meshes of quads and triangles into a closed, outward, classified triangulation. It welds nodes, splits quads, detects T-junctions, gaps and non-matching trailing edges, and caps open tips without adding nodes. It also detects Kutta edges and reports mesh quality.
 - **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges. Jitter moves each node by up to δ times its clearance, its smallest height over an edge of an incident element, so elements skew without collapsing.
@@ -16,9 +16,8 @@ Steps 1–5 are done, with validation stages 1–6 and 8. They cover:
 - **`VortexPanel.Elements`, `Assembly`, `Post`** (step 4): the flat-triangle element and quadrature tiers, the Galerkin assembly with the bordered dense solve, and surface velocity, Cp and leak. Validated on the sphere (validation stage 3) and on ellipsoids (stage 4) in uniform flow, on clean and abused meshes.
 - **`VortexPanel.Wake`, lifting assembly and forces** (step 5): rigid wake strips with their tip filaments, the wake's columns in the Galerkin system, and both force routes (pressure integration; Kutta–Joukowski with the Trefftz plane). Validated on the reference wing (stage 5).
 - **Comparison with MESA** (stage 6): both codes on the same meshes, with an exact two-dimensional referee for the section. The zero-tip Kutta condition (`DOFMapOptions(tip_kutta=:zero)`) became the default here.
+- **Isoparametric quads** (stage 7): the element the design doc defers. `MixedMesh` keeps the input's quads whole, with bilinear μ and numerically integrated inner integrals, and is compared with the split triangles on the cube-sphere and the wing.
 - **Test weights** (stage 8): the hat functions (default), median dual cells and one-rings, on the wing with clean and abused meshes.
-
-Not yet built: the isoparametric quad element, which the design doc defers, and with it validation stage 7 (split triangles against quads).
 
 ## Layout
 
@@ -26,16 +25,17 @@ Not yet built: the isoparametric quad element, which the design doc defers, and 
 src/geometry/    Geometry: build_geometry(mesh; opts) -> SurfaceGeometry, print_report, write_vtk, add_caps
 src/dofmap/      DOFMap: build_dofmap(g; opts) -> DOFMapping (C, K, slots), reduce_system, bordered_rows, wake_rows
 src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity, segment_velocity (vortex filament)
-src/elements/    Elements: FlatTriangle (hat basis, γ_b), quadrature rules and tiers (TierRules)
+src/elements/    Elements: FlatTriangle (hat basis, γ_b), quadrature rules and tiers (TierRules); IsoQuad (bilinear),
+                 project, quad_field (its inner integrals), rules on the parameter square (SquareTiers)
 src/wake/        Wake: build_wake(g, dm, V∞; opts) -> RigidWake (strips, tip filaments), WakeOptions, write_vtk
 src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts, wake) -> A, b (tiers incl. contact_rule); bordered_system,
-                 solve_galerkin; consistency
+                 solve_galerkin; consistency; MixedMesh(g, dm) and assemble(g, dm, mesh::MixedMesh, V∞; opts, wake)
 src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average;
-                 pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading
+                 pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading; surface_pressure (MixedMesh)
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
-validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid, wing, comparison and test-weight
-                 studies, and examples (own environment); common/exact_flows.jl: the exact ellipsoid flow;
+validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid, wing, comparison, element and
+                 test-weight studies, and examples (own environment); common/exact_flows.jl: the exact ellipsoid flow;
                  common/closed_body.jl: the closed-body study tables; common/wing_case.jl: solve_wing, a wing with its
                  wake and both force routes, and its midspan section; common/panel2d.jl: the 2-D linear-vortex panel
                  method; common/svgplot.jl: dependency-free SVG plots
@@ -62,6 +62,7 @@ julia -t auto --project=validation validation/sphere/run_sphere.jl           # v
 julia -t auto --project=validation validation/ellipsoid/run_ellipsoid.jl     # validation stage 4: ellipsoids in uniform flow
 julia -t auto --project=validation validation/wing/run_wing.jl               # validation stage 5: the wing with a rigid wake
 julia -t auto --project=validation validation/comparison/run_comparison.jl   # validation stage 6: against MESA (~25 min)
+julia -t auto --project=validation validation/elements/run_elements.jl       # validation stage 7: triangles against quads (~2 h)
 julia -t auto --project=validation validation/test_weights/run_test_weights.jl # validation stage 8: test weights (~20 min)
 julia -t auto --project=validation validation/examples/abused_wing.jl level=2 abuse=all   # example: abused wing, Cp in VTK
 ```
@@ -80,6 +81,7 @@ Outputs go to `validation/output/`, which is not tracked:
 - `wing/` a summary CSV of every case, the spanwise loading per level (Γ, sectional lift by both routes), chordwise Cp at η = 0, 0.5, 0.8 and 0.95, and VTK of the body (Cp, μ) and the wake (μ_w, tip filaments);
 - `examples/` the VTK of `abused_wing.jl`: body (Cp, Cp at the nodes, μ, quality), classified edges, wake (μ_w) and tip filaments;
 - `comparison/` CSV tables and SVG plots of every section of the stage-6 study (refinement, refinement by direction, the two-dimensional limit, Cp and spanwise loading, skew, trailing-edge misalignment, zero incidence, robustness), and `provenance.txt` with the codes' git commits;
+- `elements/` CSV tables and SVG plots of the stage-7 study (cube-sphere, refinement, sectional accuracy with each aspect ratio's values, Γ around midspan, midspan Cp, skew with both tip conditions, trailing-edge misalignment, zero incidence, abused meshes);
 - `test_weights/` CSV tables and SVG plots of the stage-8 study (refinement, sectional accuracy, midspan Cp, abused meshes, zero incidence).
 
 ## Geometry conventions (used by the later steps)
@@ -142,6 +144,8 @@ sol  = solve_galerkin(dm, A, b; W=wake_rows(dm, wake.te))  # q, μ = C q, λ, co
 ```
 
 `validation/common/wing_case.jl` wraps these with both force routes (`solve_wing`).
+
+With `els = MixedMesh(g, dm)` instead of `build_elements(g)`, the input's quads stay whole as isoparametric quads (stage 7). Then `assemble(g, dm, els, V∞; wake)` takes no σ, because the quads integrate their sources with their sheets, and `surface_pressure(els, sol.μ, V∞)` gives Cp at the quads' Gauss points. `solve_wing(mesh; element=:quad)` does both.
 
 **Formulation.**
 - The doublet μ is piecewise linear, and each triangle carries the vortex sheet γ = n × ∇μ.
@@ -348,15 +352,16 @@ Uniform refinement extrapolates only the free tip's lift, to CL 0.3402 (p = 1.9)
 
 **The section explains both gaps.** Take the midspan section of wings of aspect ratio 15.5, 31 and 62 (68 strips each) and extrapolate it quadratically in 1/AR to the infinite wing. Its errors against the exact section are:
 
-| panels per surface | Galerkin cl | Galerkin cm | MESA cl | MESA cm |
-|---|---|---|---|---|
-| 19 | +1.28% | −0.0022 | −5.47% | +0.0055 |
-| 38 | +0.66% | −0.0010 | −3.75% | +0.0045 |
-| 76 | +0.35% | −0.0004 | −2.53% | +0.0033 |
-| observed order | 0.95 | 1.2 | 0.55 | 0.3–0.4 |
+| panels per surface | Galerkin cl | Galerkin cm | Galerkin cl, one diagonal | Galerkin cm, one diagonal | MESA cl | MESA cm |
+|---|---|---|---|---|---|---|
+| 19 | +1.28% | −0.0022 | +1.57% | −0.0026 | −5.47% | +0.0055 |
+| 38 | +0.66% | −0.0010 | +0.78% | −0.0011 | −3.75% | +0.0045 |
+| 76 | +0.35% | −0.0004 | +0.40% | −0.0005 | −2.53% | +0.0033 |
+| observed order | 0.95 | 1.2 | 1.0 | 1.1–1.2 | 0.55 | 0.3–0.4 |
 
+- **The "one diagonal" columns are our method's own error.** The default split mirrors its diagonals at midspan, exactly where the section is measured, and that dents the circulation there (found in stage 7). Splitting every quad along the same diagonal (`GeometryOptions(split=:d13)`) removes the dent, and the section then matches the isoparametric quads' to 1e-5. The default split's figures understate the error by about a fifth.
 - **The codes bracket the exact section.** Ours converges at first order from above, MESA at order 0.5 from below.
-- **Ours is 7× closer in cl and 8× in cm at 76 panels per surface.** MESA's cl error there is what ours has at about 9 panels.
+- **Ours is 6× closer in cl and in cm at 76 panels per surface** (one diagonal: 6.4× and 6.3×). MESA's cl error there is what ours has at about 12 panels.
 - **For scale,** the 2-D method itself on PAGE's chordwise spacing is off by −1.02%, −0.48% and −0.22%.
 - **The deficit is in MESA's circulation.** Its Kutta–Joukowski lift has the same deficit as its pressure lift, so the problem is not in its pressure post-processing.
 - **The loading shows it too.** MESA's circulation loading at L2 is 3.6% below ours at midspan and 1.1% below at η = 0.8. At η = 0.95 it is 4% above ours, where our zero tip pulls the loading down.
@@ -411,7 +416,7 @@ Uniform refinement extrapolates only the free tip's lift, to CL 0.3402 (p = 1.9)
   - Keeping the clean mesh's diagonals (`GeometryOptions(split=:pattern, split_pattern=...)`, the "clean split" column) isolates the skew itself: 0.062% at L1 and 0.035% at L2.
   - The zero tip makes the flips cost about twice what they cost with free tips: 0.45% against 0.24% at L1, and 0.18% against 0.09% at L2, while the clean-split sensitivity is the same. The flips in the interior strips cause it; the few in the tip strips partly offset it.
   - Flipping the trailing-edge row's diagonals everywhere on the clean mesh changes CL by −0.26%, −0.10% and −0.03% at L1–L3 (free tips: +0.41%, +0.16%, +0.08%). That is an ordinary discretization difference that converges away.
-- **So the design doc's "much less sensitive" holds with a fixed triangulation (5× at L2), for drag, for independent jitter and in the worst case.** With the default split, the diagonal flips alone match MESA's average skew sensitivity at L2. A split that doesn't flip under small perturbations would remove them: the isoparametric quad element of stage 7, or a fixed diagonal rule next to the trailing edge.
+- **So the design doc's "much less sensitive" holds with a fixed triangulation (5× at L2), for drag, for independent jitter and in the worst case.** With the default split, the diagonal flips alone match MESA's average skew sensitivity at L2. A split that doesn't flip under small perturbations would remove them. The isoparametric quads of stage 7 have nothing to flip and are as insensitive as the clean split (0.070% at L1, 0.030% at L2), with either tip condition.
 
 **Trailing-edge misalignment.** The rows aft of 80% chord are offset by ±δ/2 with a shared trailing edge, or the upper rows by δ with a non-matching one.
 - **Shared trailing edge:** MESA is the less sensitive here. Its lift changes by −0.11% (L1) and −0.07% (L2) at δ = 0.3, and by about 0 at 0.5.
@@ -444,7 +449,7 @@ Uniform refinement extrapolates only the free tip's lift, to CL 0.3402 (p = 1.9)
 - **Conditioning:** both condition numbers grow 4× per level. Ours is 13× MESA's, and still 8.5× with the rows scaled by the diagonal, so it is not a scaling artifact.
   - Our hypersingular first-kind operator conditions worse than Morino's second-kind one.
   - A dense LU doesn't care at these sizes. An iterative solver would need a preconditioner.
-- **At equal sectional accuracy,** MESA's cl error at 76 panels per surface is ours at about 9.
+- **At equal sectional accuracy,** MESA's cl error at 76 panels per surface is ours at about 12.
 
 **The tip Kutta condition** (`DOFMapOptions(tip_kutta)`): the default `:zero` sets μ_u = μ_l at the tip node, and `:free` leaves μ_w there to the solution. This stage made `:zero` the default.
 - **Both converge to the same lift.** The chordwise limits agree to 1e-4: 0.3381 for both in pressure, and 0.3406 against 0.3407 by Kutta–Joukowski. The circulation lift extrapolated in both directions is 0.3407 for both.
@@ -453,8 +458,148 @@ Uniform refinement extrapolates only the free tip's lift, to CL 0.3402 (p = 1.9)
   - the up-down asymmetry at α = 0 (6e-6 against −2e-4 at L2);
   - the tip filament;
   - the spanwise creep of the Trefftz drag.
-- **Its cost:** the diagonal flips the default split makes next to the trailing edge cost about twice as much lift (see the skew sensitivity above).
+- **Its cost:** the diagonal flips the default split makes next to the trailing edge cost about twice as much lift (see the skew sensitivity above). Without flips the cost is gone: the isoparametric quads of stage 7 are equally sensitive with either tip condition.
 - **At a fixed chordwise resolution the two never meet.** However fine the strips, they keep different circulation lifts: 0.3416 (zero) and 0.3441 (free) at 38 panels. The tip treatment acts over a region set by the chordwise spacing.
+
+## Isoparametric quads (validation stage 7)
+
+The design doc's second element type keeps the input's quadrilaterals whole. `IsoQuad` maps the parameter square bilinearly, x(ξ, η) = Σ N_a x_a, and carries μ on the same bilinear functions. `validation/elements/run_elements.jl` compares it with the split triangles, the default, on the cube-sphere and on the reference wing. Both elements use the same nodes and DOF map, so they have the same unknowns.
+
+**The element.**
+- The edges are straight, so neighbouring quads, and quads next to triangles, meet exactly. A quad whose corners are not coplanar is a hyperbolic paraboloid.
+- The sheet's density per unit parameter area is a polynomial: γ dA = (μ_ξ a₂ − μ_η a₁) dξ dη, with the tangents a₁ = ∂x/∂ξ and a₂ = ∂x/∂η. Nothing is divided by the Jacobian.
+- `MixedMesh(g, dm)` turns every welded input quad into an `IsoQuad`. Its corner slots come from its two triangles, so trailing-edge copies, constraints and Kutta rows carry over unchanged. Caps, input triangles and the wake stay flat triangles.
+
+**Inner integrals** (`quad_field`). A curved sheet of varying strength has no closed form, so they are numerical:
+- *Far* (at least a diameter away): tensor Gauss, with 3 to 8 points per direction as the distance shrinks.
+- *Near:* polar coordinates about the closest point P, with sinh substitutions in angle and radius. The parameters are first mapped by the Cholesky factor of the metric at P, so that distances and angles are physical to first order. Without that map, a sliver's sectors crowd its whole angular variation into a few degrees.
+- *On the element* (self pairs): principal values, with each ray's 1/ρ term subtracted and added back analytically (Guiggiani). `side = ±1` gives the one-sided limits, adding half the sheet's jump γ × n and the source's σn.
+- *Closest point* (`project`): Newton from the nearest node of a 5×5 parameter grid, then the four edges. Each step is held inside [−½, 3/2]² and halved until the distance falls. Starting from the centre alone misses on trapezoids. A step that leaves the square must be cut short, not abandoned: abandoning it returned an edge point 5 mm away on sheared leading-edge slivers, where Cp then reached −33.
+- Against adaptive cubature they agree to 1e-7–1e-10, from far away down to 1e-6 diameters. The test shapes are squares, trapezoids, warped quads, slivers and a sheared sliver with 5.7° corners. A near evaluation costs 15–21 μs, against 40 ns for the triangle's closed form.
+
+**Outer rules** (`SquareTiers`): the triangle tiers carried over to the parameter square.
+- *Tiers:* tensor Gauss far (2×2) and near (3×3, refined by a quadtree near the source), and rules graded toward a shared side, a shared corner (two triangles from it) and all four sides (the self rule: four triangles from the centre). The contact rule for T-junctions, gaps and the wake cuts the square at the source's corners, as on triangles.
+- *Wide corners:* a shear makes a quad's corner wider than its 90° in parameters, which the vertex rule's angular coordinate under-samples. Such a corner is split by physical angle into pieces of at most `corner_angle` (`vertex_rect!`). On a 150° corner with unequal sides the stored rule is off by 4e-5, and more levels don't help; the split rule is off by 1e-7.
+- *Levels:* `AssemblyOptions(quad_touch_levels=4)` grades over 4 levels where the triangles use 6. On the cube-sphere, 6 levels change μ by only 2.5e-6, at 2.6× the cost.
+- *Pair blocks against adaptive cubature:* 2.7e-6 for a shared side (the neighbour folded 25° and warped), 1.9e-7 for a shared 150° corner (1e-4 with the stored rule) and 3.8e-7 for a warped quad's self block.
+
+**The two-dimensional check.** Split every quad of a prismatic wing along the same diagonal. For a spanwise-uniform μ, each triangle then carries the same constant sheet as its bilinear quad. The triangles' hat functions, summed along the span, give the quads' chordwise test functions. So in the two-dimensional limit the two elements give the same equations, by entirely different inner integrals and rules.
+- At the midspan of wings of aspect ratio 15.5–62 (68 strips) they agree to 2e-5 in cl at every aspect ratio.
+- The sections extrapolated to the infinite wing agree to 6e-5 (19 panels per surface) and 5e-6 (38).
+
+**The default split dents the circulation at its mirror line.** Its tie-break mirrors the diagonals at y = 0, so the quads on either side of midspan are split opposite ways. The triangles' test functions there differ from a uniform split's.
+- At the midspan trailing-edge node of the aspect-ratio-62 wing (19 panels per surface), Γ is 0.26% below the quads'. One station away it is 0.07% below, and two stations away under 0.02%. One diagonal throughout stays within 0.004% of the quads.
+- The dent grows with the strips' width and shrinks as the chord is refined: 0.30%, 0.44% and 0.60% at aspect ratios 15.5, 31 and 62 with 9 panels per surface.
+- The sectional studies of stages 6 and 8 measured exactly there; their text now accounts for it.
+
+**Cube-sphere** (`cube_sphere(24)`, 3,458 nodes, with the generic V∞ of stage 3). μ is relative to its largest exact value. Cp is measured at the element centres (the triangles' centroids and the quads' parameter centres) and in L2 over the elements:
+
+| mesh | element | μ L2 | μ max | Cp L2 | Cp max | Cp L2 over the elements | column defect | assembly |
+|---|---|---|---|---|---|---|---|---|
+| clean | triangles | 1.4e-4 | 1.0e-3 | 1.2e-2 | 3.0e-2 | 2.6e-2 | 4.4e-6 | 1.3 s |
+| | quads | 8.9e-5 | 2.8e-4 | 5.7e-4 | 2.4e-3 | 3.0e-2 | 1.8e-6 | 24 s |
+| jitter 0.3 | triangles | 3.9e-4 | 1.8e-3 | 1.6e-2 | 0.10 | 2.8e-2 | 8.0e-6 | 1.3 s |
+| | quads | 3.8e-4 | 1.6e-3 | 1.1e-2 | 0.079 | 3.4e-2 | 4.4e-6 | 26 s |
+
+- **μ is second order for both.** In L2 the orders are 2.0–2.1 between n = 12 and 24 on clean meshes and 1.9–2.0 jittered. On clean meshes the quads' error is 0.64× the triangles' in L2 and 0.27× at its largest. Jittered, the two are within 4–8% of each other.
+- **Cp at the quads' centres is second order on clean meshes,** 20× below the triangles' at their centroids.
+  - A nearly flat quad's normal at its centre matches the sphere's to second order. Away from the centre it is off by O(h), as a triangle's is away from its centroid.
+  - Over the elements (the quads' 3×3 Gauss points, 7 points per triangle), both are first order, and the quads' error is 15% higher.
+  - Jittered quads are not symmetric about their centres, so their Cp there is first order too, 0.7× the triangles'.
+- **The quadrature is consistent:** column defects stay below 1e-5, and λ on the jittered meshes is at most 1.4e-9 (3e-11 at n = 24).
+
+**Wing refinement** (clean meshes, α = 5°, the defaults otherwise):
+
+| level | element | CL | CL (KJ) | CDi (pressure) | CDi (Trefftz) | Cm c/4 | column defect | cond₁ | assembly |
+|---|---|---|---|---|---|---|---|---|---|
+| L1 | triangles | 0.3383 | 0.3418 | 0.01072 | 0.00895 | +0.0012 | 3.6e-5 | 1.1e4 | 0.4 s |
+| | quads | 0.3384 | 0.3419 | 0.01079 | 0.00895 | +0.0012 | 1.4e-5 | 8.9e3 | 7.7 s |
+| L2 | triangles | 0.3389 | 0.3415 | 0.01011 | 0.00927 | +0.0007 | 6.6e-5 | 4.4e4 | 2.1 s |
+| | quads | 0.3388 | 0.3414 | 0.01013 | 0.00926 | +0.0008 | 1.7e-5 | 3.5e4 | 30 s |
+| L3 | triangles | 0.3395 | 0.3411 | 0.00981 | 0.00943 | +0.0002 | 2.3e-3 | 1.7e5 | 13 s |
+| | quads | 0.3394 | 0.3411 | 0.00981 | 0.00943 | +0.0002 | 7.3e-4 | 1.4e5 | 121 s |
+
+- **The elements agree on the wing.**
+  - Lift differs by 0.03%, 0.02% and 0.01% at L1–L3, by either route.
+  - The induced drags extrapolate to the same values: 0.00953 against 0.00952 (pressure), and 0.00960 against 0.00961 (Trefftz).
+  - Only the pressure drag at L1 differs by more (+0.7%), and the gap shrinks to −0.03% at L3.
+- **Midspan Cp** (L2) agrees within 0.001 between 10% and 90% chord. The suction peaks are −1.223 and −1.224. The trailing-edge panels are 0.240/0.261 (upper/lower) for the triangles against 0.227/0.250 for the quads.
+- **The quads' column defect is lower:** 3× lower at L3, where the triangles' tip-edge pairs dominate (stage 5).
+
+**Sectional accuracy** (as in stage 6: the midspan section of wings of aspect ratio 15.5, 31 and 62 with 68 strips, extrapolated in 1/AR):
+
+| panels per surface | triangles cl | triangles cm | one diagonal cl | one diagonal cm | quads cl | quads cm |
+|---|---|---|---|---|---|---|
+| 19 | +1.28% | −0.0022 | +1.57% | −0.0026 | +1.57% | −0.0026 |
+| 38 | +0.66% | −0.0010 | +0.78% | −0.0011 | +0.78% | −0.0011 |
+| observed order | 0.95 | 1.2 | 1.01 | 1.17 | 1.01 | 1.18 |
+
+- **The quads match the one-diagonal triangles,** as the two-dimensional check requires.
+- **The default split's figures are lower only because they are measured on its mirror line.**
+- **One diagonal throughout raises the triangles' column defect** to 8e-4 at the trailing edge, against the default split's 5e-5 (at the tips). The section is unaffected.
+- **Stage 6's comparison with MESA is corrected:** with one diagonal at 76 panels per surface the error is +0.40% (cm −0.0005). This was measured separately with the triangles only; the quads would take about 40 minutes there.
+
+**Skew sensitivity** (stage 6's patterns and amplitudes). Changes are from the clean mesh of the same level and element; for jitter, the mean over 5 seeds:
+
+| level | mean (largest) \|ΔCL\|: triangles | triangles, clean split | quads | MESA (stage 6) | mean \|ΔCDi\|, pressure: triangles | quads | mean \|ΔCm\|: triangles | quads |
+|---|---|---|---|---|---|---|---|---|
+| L1 | 0.45% (0.92%) | 0.062% (0.22%) | 0.070% (0.33%) | 0.24% (0.65%) | 0.91% | 0.11% | 0.00056 | 0.00009 |
+| L2 | 0.18% (0.36%) | 0.035% (0.13%) | 0.030% (0.14%) | 0.19% (0.94%) | 0.39% | 0.09% | 0.00022 | 0.00004 |
+
+- **The quads are as insensitive as the triangles that keep the clean mesh's diagonals.**
+  - Against the default split they are 6× less sensitive in lift, 4–8× in drag and 6× in moment.
+  - Against MESA they are 3.4× less sensitive on average at L1 and 6.3× at L2, and 6.6× in the worst case at L2.
+  - With the quads, the design doc's "much less sensitive" holds without fixing the triangulation.
+- **Their response is smooth.** It grows with the square of the skew, as an ordinary change of discretization does: for lean at L1, 0.009%, 0.036%, 0.14% and 0.32% at σ = 0.05–0.3. The default split's flips already jump at the smallest skew: −0.26% at σ = 0.05.
+- **The tip condition no longer matters.**
+  - With free tips the quads' sensitivity is the same as with the zero tip: 0.070% (0.32%) at L1 and 0.030% (0.14%) at L2.
+  - The default split's is 0.24% at L1 and 0.087% at L2 with free tips, half its zero-tip figures, as stage 6 found.
+  - So the zero tip's extra sensitivity came entirely from the diagonal flips.
+
+**Trailing-edge misalignment** (stage 6's offsets of the rows aft of 80% chord, δ = ±0.1 to ±0.5 of the station spacing):
+- **Shared trailing edge:**
+  - The quads change lift by at most 0.23% at L1 and 0.09% at L2. That matches the clean split (0.26% and 0.09%), against the default split's 0.84% and 0.33%.
+  - Their change is symmetric in ±δ and quadratic.
+  - At δ = 0.3 it is 0.08% at L1 and 0.03% at L2, below MESA's 0.11% and 0.07% (stage 6).
+- **Non-matching trailing edge:** at most 0.06% at L1 and 0.02% at L2, against the triangles' 0.11% and 0.04%.
+
+**Zero incidence (L2):** the quads' lift is under 1.5e-6 on the clean, misaligned and leaning meshes, against the triangles' 8e-6. Under independent jitter it is −4e-5, against the triangles' +8e-5.
+
+**Abused meshes** (MESA's smoke set, plus all abuses at once, seed 1): every mesh runs.
+- Mean (largest) |ΔCL| from the clean mesh is 0.096% (0.33%) at L1 and 0.032% (0.14%) at L2. The triangles' is 0.26% (0.91%) and 0.10% (0.36%).
+- The quads' largest changes come from opposite lean of 0.3 (+0.33% and +0.14%) and jitter of 0.2 (+0.25% at L1, +0.07% at L2).
+- T-junctions, gaps, slivers, sliver stations and non-matching trailing edges change their lift by under 0.06%.
+- On the gap meshes the column defect is the slit flux, as in stage 3: 4.5e-2 for the quads, 3.2e-2 for the triangles.
+
+**Distorted quads integrate less accurately.** The quads' column defect at L1 and L2 reaches:
+- 5.5e-3 and 4.6e-3 with slivers. The moved nodes leave quads with one side 2% of the opposite one, so their corner Jacobians differ 50-fold.
+- 2.4e-3 and 2.8e-3 with independent jitter of 0.3, which shears corners to 5° and 175°.
+
+The triangles' defects on these meshes are 2e-5–5e-5 and 5e-4. The self blocks of such quads converge slowly as the rules are refined, to about 1e-3. Sliver stations (quads of aspect ratio 50 and more) give 1.5e-3 at L1 and 7e-4 at L2, about the triangles' 8e-4.
+
+Lift is unaffected: on these meshes the quads change it less than the triangles do. Splitting quads whose corner Jacobians differ by more than some factor would remove the first kind.
+
+**Cost and conditioning** (the wing refinement above, 16 threads):
+
+| element | assembly, L1 / L2 / L3 | quadrature points, L1 / L2 / L3 | factorization and solve | cond₁ | cond₁, rows scaled by the diagonal |
+|---|---|---|---|---|---|
+| triangles | 0.41 / 2.1 / 13 s | 48M / 270M / 2.2G | 0.01 / 0.27 / 5.2 s | 1.1e4 / 4.4e4 / 1.7e5 | 8.4e3 / 2.8e4 / 1.1e5 |
+| quads | 7.7 / 30 / 121 s | 16M / 94M / 0.82G | 0.03 / 0.25 / 5.0 s | 8.9e3 / 3.5e4 / 1.4e5 | 6.1e3 / 2.1e4 / 8.2e4 |
+
+- **Assembly costs 19×, 14× and 9× the triangles'** at L1–L3.
+  - The quads use a third of the quadrature points, but each point costs about 60× as much, since its inner integrals are numerical.
+  - The ratio falls under refinement because the far field's share grows, and a far quad costs little (a 2×2 outer rule and low-order inner Gauss).
+  - On the cube-sphere the ratio is 19×, and on the sectional wings about 10×.
+- **The quads condition slightly better:** 0.79× the triangles' cond₁, and 0.72–0.76× with the rows scaled. The unknowns are the same, so the solve costs the same.
+
+**The split triangles remain the default.** On the wing the two elements give the same lift to 0.03% and the same extrapolated induced drag. They give the same section too, once the triangles' mirror line is set aside. The triangles cost a tenth to a nineteenth of the quads' assembly. The quads are the better discretization in three ways:
+- **No diagonals.** Lift and drag don't jump when a perturbation flips a split. The quads are 6× less sensitive to skew than the default split, as insensitive as a frozen triangulation, and the tip condition stops mattering.
+- **No mirror line** at the plane of symmetry.
+- **Smooth curved bodies:** a smaller μ error (0.64× in L2 and 0.27× at its largest on the cube-sphere), and second-order Cp at the quads' centres.
+
+Their price is the assembly cost and a larger quadrature error on badly distorted quads.
+
+A split that never flips under small perturbations would give the triangles the same skew insensitivity at their own cost. Keeping a mesh family's diagonals (`split=:pattern`) does that in these studies, but no general rule of that kind is built yet. Any mirror-symmetric rule would also keep the mirror line.
 
 ## Test weights on the wing (validation stage 8)
 
@@ -486,6 +631,8 @@ Uniform refinement extrapolates only the free tip's lift, to CL 0.3402 (p = 1.9)
 | 76 | +0.35% | +0.32% | −0.0004 | +0.25% | +0.33% | −0.0005 |
 
 The one-ring weight is already unstable at 19 panels (cond₁ 5e7), so its finer sections are skipped.
+
+These sections use the default split, which mirrors its diagonals at midspan, where they are measured, and dents the circulation there (stage 7). Both weights are measured on the same meshes at the same place, so the comparison is like for like. The hat's own errors, measured with one diagonal throughout, are +1.57%, +0.78% and +0.40% in cl (stage 6).
 
 **The hat weight stays the default.** It is the most self-consistent of the three: in the section its pressure and circulation lift agree within 0.07%, and it conditions best.
 

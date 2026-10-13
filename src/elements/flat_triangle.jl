@@ -52,6 +52,9 @@ Kernels.sheet_velocity(el::FlatTriangle, μ::SVector{3}, x::SVector{3}; kwargs..
 """Flat triangle elements of a geometry, in triangle order"""
 build_elements(g::SurfaceGeometry) = [FlatTriangle(g.x[t[1]], g.x[t[2]], g.x[t[3]]) for t in g.tris]
 
+"""Largest distance from the centroid to a corner"""
+reach(el::FlatTriangle) = max(norm(el.x[1] - el.centroid), norm(el.x[2] - el.centroid), norm(el.x[3] - el.centroid))
+
 """Distance from point p to the triangle (closest point after Ericson, Real-Time Collision Detection, 5.1.5)"""
 function distance_to(el::FlatTriangle, p::SVector{3})
     a, b, c = el.x

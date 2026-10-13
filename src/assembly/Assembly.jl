@@ -14,8 +14,10 @@ using ..Elements
 using ..Wake: RigidWake, nwake
 
 export AssemblyOptions, assemble, source_strengths, bordered_system, solve_galerkin, consistency, near_rule, contact_rule, pair_block
+export MixedMesh, square_contact_rule
 
 include("assemble.jl")
+include("mixed.jl")
 include("solve.jl")
 
 end # module Assembly

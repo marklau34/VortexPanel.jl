@@ -23,8 +23,8 @@ export Geometry, DOFMap, Kernels, Elements, Wake, Assembly, Post, MeshTools
 export build_geometry, GeometryOptions, SurfaceGeometry, print_report, report_row, add_caps
 export build_dofmap, DOFMapOptions, DOFMapping, print_dofmap, wake_rows
 export build_wake, WakeOptions
-export build_elements, AssemblyOptions, assemble, source_strengths, bordered_system, solve_galerkin, consistency
+export build_elements, AssemblyOptions, assemble, source_strengths, bordered_system, solve_galerkin, consistency, MixedMesh
 export surface_velocity, gradient_velocity, pressure_coefficient
-export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading
+export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading, surface_pressure
 
 end # module VortexPanel

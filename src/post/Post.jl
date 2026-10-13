@@ -8,11 +8,12 @@ using StaticArrays
 using ..Geometry: SurfaceGeometry
 using ..DOFMap: DOFMapping, WakeTE
 using ..Kernels: source_velocity, segment_velocity, FAR_DEFAULT
-using ..Elements: FlatTriangle, sheet_strength, gradient
+using ..Elements: FlatTriangle, IsoQuad, sheet_strength, gradient, gauss_legendre, area_normal, point
+using ..Assembly: MixedMesh
 using ..Wake: RigidWake, wake_elements
 
 export element_values, sheet_strengths, surface_velocity, gradient_velocity, pressure_coefficient, nodal_average
-export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading
+export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading, surface_pressure
 
 """Nodal doublet values of every element's corners from the slot values"""
 element_values(dm::DOFMapping, μ::AbstractVector) = [SVector(μ[cs[1]], μ[cs[2]], μ[cs[3]]) for cs in dm.corner_slot]
@@ -86,5 +87,6 @@ function nodal_average(g::SurfaceGeometry, els::AbstractVector{<:FlatTriangle}, 
 end
 
 include("forces.jl")
+include("mixed.jl")
 
 end # module Post
