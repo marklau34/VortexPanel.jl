@@ -6,7 +6,7 @@ The design is in `Plan Galerkin Linear-Vortex Panel Solver (Rigid Wake Phase).md
 
 ## Status
 
-Steps 1–4 are done, through validation stage 4 (ellipsoids in uniform flow). They cover:
+Steps 1–5 are done, through validation stage 5 (the reference wing with a rigid wake). They cover:
 
 - **`VortexPanel.Geometry`** (step 1): turns surface meshes of quads and triangles into a closed, outward, classified triangulation. It welds nodes, splits quads, detects T-junctions, gaps and non-matching trailing edges, and caps open tips without adding nodes. It also detects Kutta edges and reports mesh quality.
 - **`VortexPanel.MeshTools`** (step 1): generates closed test bodies and seeded, reproducible abused meshes. The abuse covers jitter, spanwise skew, T-junctions, gaps, slivers and non-matching trailing edges. Jitter moves each node by up to δ times its clearance, its smallest height over an edge of an incident element, so elements skew without collapsing.
@@ -14,22 +14,26 @@ Steps 1–4 are done, through validation stage 4 (ellipsoids in uniform flow). T
 - **`VortexPanel.DOFMap`** (step 2): the constraint matrix C, with μ_slots = C q, and the nodal Kutta rows K, with μ_w = K q.
 - **`VortexPanel.Kernels`** (step 3): the velocity of a unit-strength source triangle, w = (1/4π)∫(x−y)/|x−y|³ dA, the one kernel of the method (sources σw, vortex sheets γ×w).
 - **`VortexPanel.Elements`, `Assembly`, `Post`** (step 4): the flat-triangle element and quadrature tiers, the Galerkin assembly with the bordered dense solve, and surface velocity, Cp and leak. Validated on the sphere (validation stage 3) and on ellipsoids (stage 4) in uniform flow, on clean and abused meshes.
+- **`VortexPanel.Wake`, lifting assembly and forces** (step 5): rigid wake strips with their tip filaments, the wake's columns in the Galerkin system, and both force routes (pressure integration; Kutta–Joukowski with the Trefftz plane). Validated on the reference wing (stage 5).
 
-Not yet built: wake geometry and the lifting solve, forces (pressure, Kutta–Joukowski, Trefftz), the isoparametric quad element.
+Not yet built: the comparison with the Morino code (stage 6), the isoparametric quad element (stage 7), the test-weight comparison on the wing (stage 8).
 
 ## Layout
 
 ```
 src/geometry/    Geometry: build_geometry(mesh; opts) -> SurfaceGeometry, print_report, write_vtk, add_caps
 src/dofmap/      DOFMap: build_dofmap(g; opts) -> DOFMapping (C, K, slots), reduce_system, bordered_rows, wake_rows
-src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity
+src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity, segment_velocity (vortex filament)
 src/elements/    Elements: FlatTriangle (hat basis, γ_b), quadrature rules and tiers (TierRules)
-src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts) -> A, b (tiers incl. contact_rule); solve_galerkin; consistency
-src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average
+src/wake/        Wake: build_wake(g, dm, V∞; opts) -> RigidWake (strips, tip filaments), WakeOptions, write_vtk
+src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts, wake) -> A, b (tiers incl. contact_rule); solve_galerkin; consistency
+src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average;
+                 pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
-validation/      reference wing, MESA baseline, geometry report, sphere and ellipsoid studies (own environment);
-                 common/exact_flows.jl: the exact ellipsoid flow; common/closed_body.jl: the closed-body study tables
+validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid and wing studies (own environment);
+                 common/exact_flows.jl: the exact ellipsoid flow; common/closed_body.jl: the closed-body study tables;
+                 common/wing_case.jl: solve_wing, a wing with its wake and both force routes
 ```
 
 ## Environments
@@ -51,6 +55,7 @@ julia --project=validation validation/geometry/report_geometry.jl            # g
 julia --project=validation validation/kernels/compare_ase.jl                 # source kernel against AeroSingularityElements
 julia -t auto --project=validation validation/sphere/run_sphere.jl           # validation stage 3: sphere in uniform flow
 julia -t auto --project=validation validation/ellipsoid/run_ellipsoid.jl     # validation stage 4: ellipsoids in uniform flow
+julia -t auto --project=validation validation/wing/run_wing.jl               # validation stage 5: the wing with a rigid wake
 ```
 
 Outputs go to `validation/output/`, which is not tracked:
@@ -59,7 +64,8 @@ Outputs go to `validation/output/`, which is not tracked:
 - spanwise loading, Cp and trailing-edge μ CSVs, and VTK;
 - `geometry/*.vtu` with a geometry report CSV;
 - `sphere/` convergence (clean and jittered), abused-mesh, quadrature-sensitivity and test-weight CSVs, and VTK of the finest icosphere and the fully abused icosphere 3 (Cp, μ, leak, their exact values and the μ error);
-- `ellipsoid/` the exact-solution checks, convergence, abused-mesh and quadrature-sensitivity CSVs, Cp along the cut y = 0 of the triaxial body, and VTK of the finest triaxial, prolate and thin oblate meshes and the fully abused triaxial one.
+- `ellipsoid/` the exact-solution checks, convergence, abused-mesh and quadrature-sensitivity CSVs, Cp along the cut y = 0 of the triaxial body, and VTK of the finest triaxial, prolate and thin oblate meshes and the fully abused triaxial one;
+- `wing/` a summary CSV of every case, the spanwise loading per level (Γ, sectional lift by both routes), chordwise Cp at η = 0, 0.5, 0.8 and 0.95, and VTK of the body (Cp, μ) and the wake (μ_w, tip filaments).
 
 ## Geometry conventions (used by the later steps)
 
@@ -89,7 +95,7 @@ All topology decisions about the unknowns are made here (design doc §4 and §7)
   - On a non-matching trailing edge, these nodes are the union of both chains' nodes, and μ_u and μ_l are interpolated along their own chains.
   - Rows of K sum to zero, so a uniform μ sheds nothing.
   - `wake_rows(dm, te_of_wake_node)` gives the C rows of the wake nodes once the strips exist.
-- **Reduced system.** It is (Cᵀ A [C; W]) q = Cᵀ b (`reduce_system`). Each closed body adds a bordered row: `bordered_rows` gives e and c = Cᵀ∫φ dA.
+- **Reduced system.** It is (Cᵀ A [C; W]) q = Cᵀ b (`reduce_system`). Every body adds a bordered row: `bordered_rows` gives e and c = Cᵀ∫φ dA. A uniform μ on a body sheds no sheet and no wake, and the body carries no filaments, so the row is needed whether the body is closed, zipped or open.
 
 ## Kernel
 
@@ -107,16 +113,19 @@ All topology decisions about the unknowns are made here (design doc §4 and §7)
 
 ## Galerkin system
 
-Solving a problem takes six calls:
+Solving a problem takes six calls, and a lifting body adds its wake:
 
 ```julia
-g   = build_geometry(mesh)                   # closed, classified triangulation
-dm  = build_dofmap(g)                        # slots, C, Kutta rows
-els = build_elements(g)                      # flat triangles with hat functions
-σ   = source_strengths(els, V∞)              # σ = −V∞·n
-A, b, stats = assemble(g, dm, els, σ, V∞)    # A μ = b states ∫ψᵢ n·u dA = 0
-sol = solve_galerkin(dm, A, b)               # q, μ = C q, λ, cond
+g    = build_geometry(mesh)                  # closed, classified triangulation
+dm   = build_dofmap(g)                       # slots, C, Kutta rows
+els  = build_elements(g)                     # flat triangles with hat functions
+wake = build_wake(g, dm, V∞)                 # rigid strips from the trailing edge (lifting bodies)
+σ    = source_strengths(els, V∞)             # σ = −V∞·n
+A, b, stats = assemble(g, dm, els, σ, V∞; wake)            # A μ = b states ∫ψᵢ n·u dA = 0
+sol  = solve_galerkin(dm, A, b; W=wake_rows(dm, wake.te))  # q, μ = C q, λ, cond; μ_w = dm.K * sol.q
 ```
+
+`validation/common/wing_case.jl` wraps these with both force routes (`solve_wing`).
 
 **Formulation.**
 - The doublet μ is piecewise linear, and each triangle carries the vortex sheet γ = n × ∇μ.
@@ -227,3 +236,73 @@ The meshes are scaled unit spheres, so the prolate carries panels of aspect rati
 - **All at once:** a sliver on the stretched, jittered mesh leaves a facet tilted 25° from the surface. The largest μ error grows 12× and the L2 error 5×.
 - **Jitter bound:** jitter was first bounded by each node's shortest edge. On these stretched meshes that collapsed obtuse triangles to 176°, leaving facets tilted 31° with Cp errors of order one there. It is now bounded by the node's clearance; the sphere's jittered results above improved by about 15%.
 - **Cp max error on jittered meshes** (0.14 at 2,562 nodes) comes from the gradient route on irregular triangles, as on the sphere. Its L2 converges at first order.
+
+## Rigid wake and lifting bodies
+
+**Wake strips** (`build_wake`, design doc §7):
+- Every pair of neighbouring wake trailing-edge nodes spans a strip of two triangles per row. The rows sit at 0, ℓ₁, ℓ₁(1 + r), … from the trailing edge until 20 spans (`WakeOptions`):
+  - the first row ℓ₁ defaults to the trailing-edge panels' size;
+  - the growth ratio r defaults to 1.2;
+  - the first row runs along the freestream or the trailing-edge bisector, and the rest along the freestream;
+  - the strips end there (`:truncate`) or continue to 1000 times further (`:semi_infinite`).
+- Every node of a strip carries the μ_w of its trailing-edge node (a row of K), so the wake sheds trailing vorticity only. The system has a column per wake node, folded back onto the unknowns by `wake_rows(dm, wake.te)`.
+- **Orientation:** wake triangles face the upper side (wake_dir × τ). The trailing-edge filaments of the upper surface, the lower surface and the wake then cancel under μ_w = μ_u − μ_l, so no trailing-edge filament is modelled.
+- **Tip filaments:** the strips' outer sides carry filaments of strength μ_w, the tip vortices, and nothing crosses the far end (no starting vortex). With γ = n × ∇μ, a doublet layer is bounded by a filament running *clockwise* about its normal: where μ drops across a thin band, γ points against the counterclockwise tangent. So for a lifting wing the right tip filament runs downstream. The first implementation had them backwards, which gave the wing nearly two-dimensional loading.
+- **Quadrature:** wake triangles share no mesh node with the body, so the contact tier finds the first row's trailing-edge contact geometrically. A filament starting at a test triangle's corner (the tip node) takes the vertex rule; its 1/r singularity there is integrable.
+
+**No filaments on the body.** Wherever μ jumps on the body, or the layer ends at a free edge, the doublet layer equals the sheets plus a filament whose strength is the jump. On a panel that holds the filament along an edge, its swirl Γ/(2πd) is entirely normal to the panel. So the Galerkin row of a node on that edge has an integrand ~1/d, with d the distance from the edge. (Nodes off the edge are fine, since their hat functions vanish on it.) The body is therefore modelled by its sheets alone:
+- **Free edges** (open or zipped tips): ∫₀ dd/d diverges, so no finite discrete equation exists. The filament has to be left out, and the tip vorticity then leaks.
+- **Interior jump lines** (the cap seam below): the faces on either side see equal and opposite 1/d terms, because the swirl goes in through one face and out through the other. A seam node's row is then a finite principal value, but only when both sides are integrated together with matched singular rules. The pairwise assembly doesn't do that, so the seam filament is left out.
+- **MESA doesn't run into this.** Morino's potential-based formulation sees a doublet panel through its solid angle, which stays bounded even at the panel's edges, and it collocates at centroids. So jumps in μ are harmless there, and MESA has them across every panel edge.
+
+The consequences:
+- **Cap seam:** the cap's corners at the tip trailing-edge node take the upper copy. The residual jump μ_u − μ_l along the cap's seam with the lower surface is therefore left out. It converges away:
+  - choosing the lower copy instead changes CL by 0.4% at L1 and 0.2% at L2;
+  - the lift at α = 0 is −5e-4 at L1 and −2e-4 at L2.
+- **Zipped and open tips** leave their boundary vorticity out, so they are not physical models. Open tips lose the tip vortex (CL 0.47, tip loading 0.6), and zipped tips leave a large net flux through the tip (column defect 0.4–0.6). Caps are required, as the design doc's locked decisions say.
+
+**Tip loading.** At a free tip the loading goes to zero, in inviscid theory and in real flow:
+- A nonzero circulation at the tip would leave a concentrated vortex at the trailing edge's corner. The velocity there would be infinite, breaking the Kutta condition, and so would the induced drag.
+- So Γ falls like √(distance from the tip); the elliptic Γ ∝ √(1 − (2y/b)²) shows the shape. The shed vorticity, dΓ/dy ~ 1/√d, concentrates near the tips and rolls up downstream into the tip vortex.
+- In real flow the pressure still equalizes around the tip. The tip vortex sits over the upper surface there and often adds a local suction bump before the load drops.
+- None of this holds where the tip isn't free: at a root against a wall, fuselage or symmetry plane, at an endplate, or at a winglet that carries the load on.
+
+**The tip filament is a discretization artifact in both codes, of different kinds:**
+- **Ours is avoidable.** μ_w is linear between nodes and the tip node sits on the tip, so the model could go to zero there. But the nodal Kutta condition leaves μ_u − μ_l free at the corner, and the solve settles on a nonzero value. Its share of the peak falls 0.24, 0.17, 0.13 at L1–L3, about ×0.73 per level (roughly h^½). Setting μ_u = μ_l at the tip node, which is the Kutta condition at the corner, would remove both the tip filament and the cap-seam jump. The cost is that a linear ramp from zero under-represents the √d profile on the last strip.
+- **MESA's is structural, not a mistake.** Its constant-strength strips form a vortex lattice, with a filament at every strip boundary. The tip filament is the last of these and carries the whole tip-strip strength. That strength represents the loading a finite distance in from the tip (~√(strip width)), and it shrinks as the strip narrows.
+- Both converge with refinement. Our tip variants move CL by 0.2–0.4%, small next to the 3% gap with MESA.
+
+**Forces** (`Post`, in units of q∞; doc §9):
+- **Pressure:** `pressure_force` integrates the gradient route's Cp, which is constant on each triangle, so the integral is exact.
+- **Kutta–Joukowski:** `kutta_joukowski_force` gives F = (2/|V∞|²) V∞ × ∫μ_w dl along the trailing edge; the trapezoidal sum is exact for linear μ_w.
+- **Trefftz drag:** `trefftz_drag` puts strips of mean μ_w between the trailing-edge nodes and evaluates their trailing vortices' downwash at the strip middles. It is the vector form of the validated `loads.jl` formula, with an elliptic loading giving CL²/(πAR). Its midpoint downwash keeps the drag finite despite a nonzero μ_w at the tips, which the exact Trefftz integral would make infinite.
+- **Spanwise loading:** `spanwise_loading` gives the per-strip lift by both routes.
+
+## Reference wing with a rigid wake (validation stage 5)
+
+Results from `validation/wing/run_wing.jl`, on MESA's reference wing (NACA 0015, rectangular, AR 3.88) at α = 5°, with capped tips and a wake along the freestream to 20 spans:
+
+| level | unknowns | CL | CL (KJ) | CDi (pressure) | CDi (Trefftz) | Cm c/4 | tip μ_w / max | cond₁ | time |
+|---|---|---|---|---|---|---|---|---|---|
+| L1 | 702 | 0.3442 | 0.3480 | 0.01087 | 0.00942 | −0.0010 | 0.24 | 1.1e4 | 1.4 s |
+| L2 | 2695 | 0.3413 | 0.3440 | 0.01016 | 0.00953 | −0.0002 | 0.17 | 4.4e4 | 4.9 s |
+| L3 | 10557 | 0.3405 | 0.3422 | 0.00983 | 0.00959 | −0.0002 | 0.13 | 1.7e5 | 38 s |
+| Richardson | | 0.3402 | 0.3407 | 0.00954 | 0.00967 | | | | |
+
+- **The two routes converge to the same loads:** lift agrees to 0.15% and induced drag to 1.3% in the extrapolation. The strip-by-strip lift agrees within 1% at midspan; at the tip strip the routes differ by design, since the cap's sharp edges carry inviscid side-edge suction.
+- **Tip loading** falls under refinement, as the doc asks to check: 0.24, 0.17, 0.13.
+- **Kutta condition:** the upper and lower Cp of the midspan trailing-edge triangles differ by 0.027 at L1 and 0.020 at L2.
+- **Wake geometry doesn't matter at this resolution:** the bisector first row, 50 spans, semi-infinite strips, MESA's first row (0.045) and growth 1.1 or 1.5 all change CL by at most 7e-5 at L2.
+- **Quadrature** is converged: the reference rules change CL by 1e-5 at L1. At L3 the column defect reaches 2e-3 at the tip edges, where the cosine spacing makes the tip strip 0.0014 m wide against the perpendicular cap. Widening the contact tolerance to 0.25 cuts that 9×, at twice the assembly cost, and changes CL by 3e-6, so the default stays.
+- **Zero incidence:** lift is −5e-4 and −2e-4, the caps' up-down asymmetry. The pressure drag, a discretization error, is 1.2e-3 and 3.8e-4.
+- **Conditioning** grows 4× per level and is about 14× MESA's (Morino's second-kind Dirichlet formulation conditions better). A dense LU is unaffected at these sizes.
+
+**Abused meshes** (the MESA smoke set, seed 1):
+- At L1 every case changes CL by at most 0.64%. The largest is opposite spanwise lean of 0.3; misaligned trailing edges give 0.34%, jitter 0.26%, and T-junctions, gaps and slivers under 0.07%.
+- At L2 every case is within 0.26%.
+- Non-matching trailing edges shed the wake from the union of both edges' nodes and change CL by under 0.06%.
+
+**Next to MESA (stage 6 will compare in depth):**
+- At L3 with capped tips MESA gives CL 0.3298 and CL_KJ 0.3343. That is 3% below our pressure lift, and its two routes still differ by 1.4% with the KJ value rising under refinement.
+- MESA's Cm about c/4 is +0.005 and ours is about 0.
+- Its CDi (0.0095 pressure, 0.0091 Trefftz) is close to ours.

@@ -9,8 +9,9 @@ using LinearAlgebra
 using StaticArrays
 using ..Geometry: SurfaceGeometry
 using ..DOFMap: DOFMapping, reduce_system, bordered_rows
-using ..Kernels: source_velocity, FAR_DEFAULT
+using ..Kernels: source_velocity, segment_velocity, FAR_DEFAULT
 using ..Elements
+using ..Wake: RigidWake, nwake
 
 export AssemblyOptions, assemble, source_strengths, solve_galerkin, consistency, near_rule, contact_rule, pair_block
 

@@ -58,8 +58,8 @@ Wake
   a uniform μ sheds nothing. `implicit[k]` flags rows that are unknowns of the implicit system (all, for a rigid wake).
 
 Bodies
-- `slot_area[s]` = ∫φ_s dA, `body_q[b]` the unknowns of body b and `body_closed[b]` whether it needs the bordered
-  constraint row (a uniform μ on a closed body induces nothing).
+- `slot_area[s]` = ∫φ_s dA, `body_q[b]` the unknowns of body b and `body_closed[b]` whether it is closed (left open
+  or zipped otherwise). Every body has a bordered constraint row (`bordered_rows`): a uniform μ on it induces nothing.
 """
 struct DOFMapping{T}
     nslot::Int

@@ -60,7 +60,7 @@ test_integrals(test::Symbol) = test === :onering ? SVector(1.0, 1.0, 1.0) : SVec
 Rule on test element T for a near source element S: T is split in four (at the edge midpoints) recursively while a
 sub-triangle's centroid is closer to S than `ratio` times its size, up to `depth` levels; the leaves carry `base`.
 """
-function near_rule(T::FlatTriangle, S::FlatTriangle, base::BaryRule, ratio::Real, depth::Integer)
+function near_rule(T::FlatTriangle, S, base::BaryRule, ratio::Real, depth::Integer)
     λs, ws = SVector{3,Float64}[], Float64[]
     near_pieces!(λs, ws, T, S, base, ratio, depth, CORNERS, 1.0, 0)
     return BaryRule(λs, ws)
@@ -118,8 +118,11 @@ function vertex_rule(T::FlatTriangle, k::Integer, rules::TierRules, opts::Assemb
     return BaryRule(λs, ws)
 end
 
-"""Append the near rule (`near_rule`) on the piece of T with barycentric corners b and area fraction frac"""
-function near_pieces!(λs, ws, T::FlatTriangle, S::FlatTriangle, base::BaryRule, ratio::Real, depth::Integer, b, frac, level)
+"""
+Append the near rule (`near_rule`) on the piece of T with barycentric corners b and area fraction frac; the source S is
+anything with a `distance_to` (a triangle or a filament segment)
+"""
+function near_pieces!(λs, ws, T::FlatTriangle, S, base::BaryRule, ratio::Real, depth::Integer, b, frac, level)
     p1, p2, p3 = point(T, b[1]), point(T, b[2]), point(T, b[3])
     size = max(norm(p2 - p1), norm(p3 - p2), norm(p1 - p3))
     if level < depth && distance_to(S, (p1 + p2 + p3) / 3) < ratio * size
@@ -138,6 +141,14 @@ function segment_projection(p::SVector{3}, a::SVector{3}, c::SVector{3})
     t = clamp(dot(p - a, e) / dot(e, e), 0.0, 1.0)
     return norm(p - (a + t * e)), t
 end
+
+"""A straight filament from a to b (a wake tip filament) as a source of the assembly"""
+struct Segment{T}
+    a::SVector{3,T}
+    b::SVector{3,T}
+end
+
+Elements.distance_to(s::Segment, p::SVector{3}) = first(segment_projection(p, s.a, s.b))
 
 """Parameters along the edges (corner k to k+1) of the piece with corners p at which a corner of S lies, away from the ends"""
 function edge_splits(p, S::FlatTriangle, tol::Real)
@@ -268,6 +279,80 @@ function pair_rule(g::SurfaceGeometry, els, t::Integer, s::Integer, tri, rules::
 end
 
 """
+Tier and rule for body test triangle T and wake triangle S. They share no mesh node, so the wake's first row, which
+meets the body along the trailing edge, is found by the contact test (an edge or a corner of T on S).
+"""
+function wake_pair_rule(T::FlatTriangle, S::FlatTriangle, rules::TierRules, opts::AssemblyOptions)
+    norm(S.centroid - T.centroid) > opts.far_ratio * max(T.diam, S.diam) && return 6, rules.far
+    contact = contact_rule(T, S, (false, false, false), rules, opts)
+    isnothing(contact) || return 4, contact
+    return 5, near_rule(T, S, rules.near, opts.near_ratio, opts.near_depth)
+end
+
+"""
+Tier and rule for body test triangle T and filament segment f: the vertex rule where the filament starts at a corner
+of T (a tip filament at the trailing edge's end node, whose 1/r singularity there is integrable), else far or near
+"""
+function segment_rule(T::FlatTriangle, f::Segment, rules::TierRules, opts::AssemblyOptions)
+    L = norm(f.b - f.a)
+    norm((f.a + f.b) / 2 - T.centroid) > opts.far_ratio * max(T.diam, L) && return 6, rules.far
+    for k in 1:3
+        min(norm(T.x[k] - f.a), norm(T.x[k] - f.b)) <= 1e-12 * T.diam && return 3, vertex_rule(T, k, rules, opts)
+    end
+    return 5, near_rule(T, f, rules.near, opts.near_ratio, opts.near_depth)
+end
+
+"""
+Contribution of filament segment f, of linearly varying strength, to the rows of test element T with the rule:
+∫ψ_a n_T·v_a dA and ∫ψ_a n_T·v_b dA, the parts per unit strength at the segment's two ends (`segment_velocity`)
+"""
+@inline function segment_block(T::FlatTriangle{F}, f::Segment{F}, rule::BaryRule, test::Symbol) where {F}
+    ca, cb = zero(SVector{3,F}), zero(SVector{3,F})
+    for (λ, wq) in zip(rule.λ, rule.w)
+        va, vb = segment_velocity(f.a, f.b, point(T, λ))
+        ψ = (wq * T.area) * test_weights(test, λ)
+        ca += dot(va, T.n) * ψ
+        cb += dot(vb, T.n) * ψ
+    end
+    return ca, cb
+end
+
+"""The wake as sources of the assembly: its triangles (elements and wake nodes) and tip filament segments"""
+function wake_sources(w::RigidWake, ::Type{F}) where {F}
+    return (elements=[FlatTriangle(SVector{3,F}.(w.x[t])...) for t in w.tris], tris=w.tris,
+        segments=[Segment(SVector{3,F}(w.x[a]), SVector{3,F}(w.x[b])) for (a, b) in w.filaments], filaments=w.filaments)
+end
+
+"""
+Add the wake's columns (after the `ns` slots) of test triangle T's rows to `buf`: the sheets of the wake triangles and
+the tip filaments, per unit doublet strength at each wake node
+"""
+function add_wake!(buf, pairs, points, T::FlatTriangle{F}, ns::Integer, w, rules::TierRules, opts::AssemblyOptions) where {F}
+    for (s, S) in enumerate(w.elements)
+        tier, rule = wake_pair_rule(T, S, rules, opts)
+        blk, _ = pair_block(T, S, rule, zero(F), opts.test, 0, opts.kernel_far)
+        c = w.tris[s]
+        for bb in 1:3, a in 1:3
+            buf[ns+c[bb], a] += blk[a, bb]
+        end
+        pairs[tier] += 1
+        points[tier] += length(rule)
+    end
+    for (f, seg) in enumerate(w.segments)
+        tier, rule = segment_rule(T, seg, rules, opts)
+        ca, cb = segment_block(T, seg, rule, opts.test)
+        ia, ib = w.filaments[f]
+        for a in 1:3
+            buf[ns+ia, a] += ca[a]
+            buf[ns+ib, a] += cb[a]
+        end
+        pairs[tier] += 1
+        points[tier] += length(rule)
+    end
+    return nothing
+end
+
+"""
     source_strengths(g, V∞; V_body=zero)
 
 Prescribed source strengths σ = -(V∞ - V_body)·n of every triangle (V_body = 0 for a body at rest; the hook for body
@@ -276,16 +361,18 @@ motion).
 source_strengths(els::AbstractVector{<:FlatTriangle}, V∞::SVector{3}; V_body::SVector{3}=zero(V∞)) = [-dot(V∞ - V_body, el.n) for el in els]
 
 """
-    assemble(g, dm, els, σ, V∞; opts=AssemblyOptions(), external=nothing)
+    assemble(g, dm, els, σ, V∞; opts=AssemblyOptions(), external=nothing, wake=nothing)
 
-Galerkin system over the slots (doc §6): A (nslot × nslot), with A_ij = ∫ψ_i n·u_γ[φ_j] dA, and
-b_i = -∫ψ_i n·(V∞ + u_σ + u_ext) dA, the velocities taken on the fluid side, so that A μ = b states ∫ψ_i n·u dA = 0.
-The freestream part of b is exact; the source part uses the same kernel evaluations as A. `external(x)`, if given,
-is a velocity field (e.g. particles) added at the test triangles' points (7-point rule). Returns A, b and statistics
-(pairs and points per tier, time).
+Galerkin system over the slots (doc §6): A_ij = ∫ψ_i n·u[φ_j] dA and b_i = -∫ψ_i n·(V∞ + u_σ + u_ext) dA, the
+velocities taken on the fluid side, so that A μ = b states ∫ψ_i n·u dA = 0. The rows are the body's slots (the wake is
+never tested); the columns are the slots (their vortex sheets) followed, with a `wake`, by the wake's nodes (their
+sheets on the wake triangles and the tip filaments), which `wake_rows(dm, wake.te)` folds back onto the unknowns
+(`solve_galerkin(...; W)`). The freestream part of b is exact; the source part uses the same kernel evaluations as A.
+`external(x)`, if given, is a velocity field (e.g. particles) added at the test triangles' points (7-point rule).
+Returns A, b and statistics (pairs and points per tier, time).
 """
 function assemble(g::SurfaceGeometry, dm::DOFMapping, els::AbstractVector{<:FlatTriangle}, σ::AbstractVector, V∞::SVector{3};
-    opts::AssemblyOptions=AssemblyOptions(), external=nothing)
+    opts::AssemblyOptions=AssemblyOptions(), external=nothing, wake::Union{Nothing,RigidWake}=nothing)
     check_options(opts)
     nt, ns = length(els), dm.nslot
     rules = tier_rules(opts)
@@ -295,7 +382,9 @@ function assemble(g::SurfaceGeometry, dm::DOFMapping, els::AbstractVector{<:Flat
         push!(touch_geo, (a, b), (b, a))
     end
     F = eltype(els[1].n)
-    At = zeros(F, ns, ns) # transposed: column i holds row i of A
+    nw = isnothing(wake) ? 0 : nwake(wake)
+    wsrc = isnothing(wake) ? nothing : wake_sources(wake, F)
+    At = zeros(F, ns + nw, ns) # transposed: column i holds row i of A
     b = zeros(F, ns)
     pairs = zeros(Int, length(TIER_NAMES))
     points = zeros(Int, length(TIER_NAMES))
@@ -305,7 +394,7 @@ function assemble(g::SurfaceGeometry, dm::DOFMapping, els::AbstractVector{<:Flat
     time = @elapsed begin
         tasks = map(chunks) do chunk
             task = () -> begin
-                buf = zeros(F, ns, 3)
+                buf = zeros(F, ns + nw, 3)
                 rows = zeros(F, 3)
                 my_pairs, my_points = zeros(Int, length(TIER_NAMES)), zeros(Int, length(TIER_NAMES))
                 for t in chunk
@@ -325,6 +414,7 @@ function assemble(g::SurfaceGeometry, dm::DOFMapping, els::AbstractVector{<:Flat
                         my_pairs[tier] += 1
                         my_points[tier] += length(rule)
                     end
+                    isnothing(wsrc) || add_wake!(buf, my_pairs, my_points, T, ns, wsrc, rules, opts)
                     # freestream (exact) and external velocity
                     rows .-= dot(V∞, T.n) * T.area .* test_integrals(opts.test)
                     if !isnothing(external)

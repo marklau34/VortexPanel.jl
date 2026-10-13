@@ -35,15 +35,17 @@ function solve_galerkin(dm::DOFMapping, A::AbstractMatrix, b::AbstractVector; W=
 end
 
 """
-    consistency(dm, A, b)
+    consistency(dm, A, b; W=nothing)
 
-Quadrature diagnostics of the assembled system on closed bodies: with exact integration every row of A sums to zero
-(a uniform doublet sheds no vortex sheet; exact by construction), every column of A C sums to zero (the vortex sheet
-of an unknown's basis function, continuous through T-junctions and stitches, has no net flux through the closed
+Quadrature diagnostics of the assembled system on closed bodies, in terms of A C_full with C_full = [C; W] (W the wake
+rows when A has wake columns). With exact integration every row sums to zero (a uniform doublet sheds no vortex sheet,
+and its Kutta rows vanish; exact by construction), every column sums to zero (the field of an unknown's vortex sheets
+and filaments, continuous through T-junctions and stitches, is solenoidal and has no net flux through the closed
 surface), and the entries of b sum to zero (no net source flux). Returns the relative row and column sum defects and
 the relative sum of b. A gap of relative width ε adds O(ε log ε) to the columns at its stitch: the flux through the slit.
 """
-function consistency(dm::DOFMapping, A::AbstractMatrix, b::AbstractVector)
-    nA = norm(A, Inf)
-    return (rows=maximum(abs, sum(A, dims=2)) / nA, columns=maximum(abs, sum(A * dm.C, dims=1)) / nA, rhs=abs(sum(b)) / sum(abs, b))
+function consistency(dm::DOFMapping, A::AbstractMatrix, b::AbstractVector; W=nothing)
+    ACf = A * (isnothing(W) ? dm.C : vcat(dm.C, W))
+    nA = norm(ACf, Inf)
+    return (rows=maximum(abs, sum(ACf, dims=2)) / nA, columns=maximum(abs, sum(ACf, dims=1)) / nA, rhs=abs(sum(b)) / sum(abs, b))
 end

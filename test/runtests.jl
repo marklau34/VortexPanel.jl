@@ -12,6 +12,7 @@ const G = VortexPanel.Geometry
 
 include(joinpath(@__DIR__, "..", "validation", "common", "reference_wing.jl"))
 include(joinpath(@__DIR__, "..", "validation", "common", "exact_flows.jl"))
+include(joinpath(@__DIR__, "..", "validation", "common", "wing_case.jl"))
 include(joinpath(@__DIR__, "helpers.jl"))
 
 @testset "VortexPanel" begin
@@ -22,8 +23,12 @@ include(joinpath(@__DIR__, "helpers.jl"))
     @testset "Mesh abuse" include("meshtools/test_abuse.jl")
     @testset "DOF map" include("dofmap/test_dofmap.jl")
     @testset "Kernels" include("kernels/test_kernels.jl")
+    @testset "Segment kernel" include("kernels/test_segment.jl")
     @testset "Elements" include("elements/test_elements.jl")
     @testset "Touching and contact quadrature" include("assembly/test_contact.jl")
     @testset "Sphere (validation stage 3)" include("assembly/test_sphere.jl")
     @testset "Ellipsoids (validation stage 4)" include("assembly/test_ellipsoid.jl")
+    @testset "Wake" include("wake/test_wake.jl")
+    @testset "Force routes" include("post/test_forces.jl")
+    @testset "Wing (validation stage 5)" include("assembly/test_wing.jl")
 end

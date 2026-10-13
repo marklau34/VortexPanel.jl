@@ -145,7 +145,8 @@ end
     check_row_sums(dm)
     @test reproduction_error(dm, g, x -> 0.3 + 1.7x[1] - 0.9x[2]) < 1e-12 # the sides pair at equal x
     @test stitch_offset(dm, g) ≈ maximum(p.width for p in g.gaps if p.kind == :zip) rtol = 1e-9
-    @test isempty(bordered_rows(dm)) # a zipped body is not closed
+    @test !dm.body_closed[1] # a zipped body is not closed, but a uniform μ on it still induces nothing
+    @test length(bordered_rows(dm)) == 1
 end
 
 @testset "abused wing" begin

@@ -32,14 +32,15 @@ end
 """
     bordered_rows(dm)
 
-For every closed body b, the border vectors of its constraint row (doc §8): `e` is one on the body's unknowns and
+For every body b, the border vectors of its constraint row (doc §8): `e` is one on the body's unknowns and
 `c = Cᵀ(∫φ dA)` restricted to the body, so that cᵀq is the integral of μ over the body; the system becomes
-[CᵀAC e; cᵀ 0][q; λ] = [Cᵀb; 0], pinning the area-weighted mean of μ to zero.
+[CᵀAC e; cᵀ 0][q; λ] = [Cᵀb; 0], pinning the area-weighted mean of μ to zero. A uniform μ on a body sheds no vortex
+sheet and no wake (its Kutta rows vanish), and the solver models no filaments on the body, so every body needs the
+row, closed or not (an open or zipped body would leave uncancelled filaments only in the doublet-layer picture).
 """
 function bordered_rows(dm::DOFMapping{T}) where {T}
     rows = NamedTuple{(:body, :e, :c),Tuple{Int,Vector{T},Vector{T}}}[]
-    for (b, closed) in enumerate(dm.body_closed)
-        closed || continue
+    for b in eachindex(dm.body_closed)
         e = zeros(T, dm.nq)
         e[dm.body_q[b]] .= 1
         c = Vector(dm.C' * (dm.slot_area .* (dm.slot_body .== b)))
@@ -97,7 +98,7 @@ function print_dofmap(io::IO, dm::DOFMapping, g::Union{Nothing,SurfaceGeometry}=
         @printf(io, "  %-22s %d nodes in %d line(s) of %s nodes\n", "wake trailing edge", nwake_te(dm.wake_te), length(dm.wake_te.lines),
             join(length.(dm.wake_te.lines), ", "))
     end
-    @printf(io, "  %-22s %d of %d bodies closed (bordered rows); cap corners at trailing edge nodes use the %s copy\n", "bodies",
+    @printf(io, "  %-22s %d of %d closed (each has a bordered row); cap corners at trailing edge nodes use the %s copy\n", "bodies",
         count(dm.body_closed), length(dm.body_closed), dm.options.cap_te_copy)
     for m in dm.log
         println(io, "  note: ", m)
