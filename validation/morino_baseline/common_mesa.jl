@@ -131,3 +131,31 @@ function mesa_case(mesh::Mesh; wake_len::Real, te_dir::Symbol=:freestream, nspan
     return (; coeffs..., CL_KJ, CDi_T, alpha=rad2deg(pitch_angle(R)), cond_raw=conds.raw, cond_jacobi=conds.jacobi,
         check, timings, npan=pansys.npan, spanwise, cm_strip, μ_w=μ_w[order], y_edges, η, cp_up, cp_low, xc_up)
 end
+
+"""
+    mesa_freewake(mesh; dt, nsteps, maxwakelen, te_len, r_vortex, prescribed=false, te_dir=:freestream, alpha=ALPHA_DEG, ref=WING_REF)
+
+MESA's free wake on a copy of the body frame `mesh` (trailing edge split, tips capped, as MESA needs), started
+impulsively at `alpha` degrees: `nsteps` steps of `dt` (seconds, at MESA's freestream `VINF`), up to `maxwakelen` free
+panel rows before the oldest is converted into particles, trailing edge panels of length `te_len` along `te_dir`, and
+one Rosenhead–Moore core `r_vortex` for every particle (`RegularizationParams`). The matrix is factored once
+(`static_mesh`). With `prescribed` the wake moves with the freestream for the whole run (`wake_init_mode =
+"prescribe_vel"`). Returns the pressure lift coefficient of every step and the run time.
+"""
+function mesa_freewake(mesh::Mesh; dt::Real, nsteps::Integer, maxwakelen::Integer, te_len::Real, r_vortex::Real, prescribed::Bool=false,
+    te_dir::Symbol=:freestream, alpha::Real=ALPHA_DEG, ref::WingReference=WING_REF)
+    refframes = (MESAFrame(FixedFrame(SA[0.0, 0.0, 0.0], RotY(deg2rad(-alpha), PitchFrame, MESAGlobalFrame))),)
+    te_vec = te_dir == :freestream ? SA[1.0, 0.0, 0.0] : te_dir == :bisector ? SA[NaN, NaN, NaN] : error("Unknown te_dir $te_dir")
+    comp = SurfacePanelComponent(deepcopy(mesh), PitchFrame; name=:wing, te_len=te_len, te_dir=te_vec)
+    loadmon = LoadMon(name=:wing_loads, comp=:wing, frame=MESAGlobalFrame)
+    params = MESASettings(ige=false, use_gpu=false, static_mesh=true, no_warn=true, reg_params=RegularizationParams(r_vortex=r_vortex))
+    nte = length(get_boundary(mesh, "trailing_edge_1").facets)
+    maxpart = (nsteps + 2) * (nte + 2)
+    wake = prescribed ?
+           MESA.FreeWake(dt=dt, stepmax=nsteps, maxpart=maxpart, maxwakelen=maxwakelen, wake_init_mode="prescribe_vel",
+        pre_wake_vel=SA[VINF, 0.0, 0.0], pre_wake_tstep=nsteps + 1) :
+           MESA.FreeWake(dt=dt, stepmax=nsteps, maxpart=maxpart, maxwakelen=maxwakelen)
+    prob = MESAProblem(params, wake, (comp,), refframes, FREESTREAM; loads_monitor=(loadmon,))
+    t = @elapsed solve(prob)
+    return [force_coefficients(F, M, ref).CL for (F, M) in zip(loadmon.force, loadmon.moment)], t
+end

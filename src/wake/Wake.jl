@@ -13,7 +13,7 @@ using ..Geometry: SurfaceGeometry
 using ..DOFMap: DOFMapping, nwake_te
 using ..Elements: FlatTriangle
 
-export WakeOptions, RigidWake, build_wake, wake_elements, wake_values, nwake
+export WakeOptions, RigidWake, build_wake, te_panel, te_panel_size, wake_elements, wake_values, nwake
 
 include("rigid.jl")
 include("export.jl")

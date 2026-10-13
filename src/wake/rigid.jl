@@ -10,7 +10,10 @@ Geometry of the rigid wake (doc §7).
 - `length = 20.0`: the wake's length along the freestream in spans (the largest distance between two wake trailing
   edge nodes); the last row ends at or beyond it.
 - `ending = :truncate`: the strips end there and the starting vortex is left out (no filament crosses the far end);
-  `:semi_infinite` adds a last row reaching `far_factor` times further, standing for strips that run to infinity.
+  `:semi_infinite` adds a last row reaching `far_factor` times further, standing for strips that run to infinity;
+  `:closed` ends the doublet layer with a filament along the last row (the trailing edge panel of a free wake,
+  `te_panel`, or a wake that includes its starting vortex).
+- `rows`: the rows' distances from the trailing edge, starting at 0, instead of `first_row`, `growth` and `length`.
 """
 Base.@kwdef struct WakeOptions
     direction::Symbol = :freestream
@@ -19,12 +22,16 @@ Base.@kwdef struct WakeOptions
     length::Float64 = 20.0
     ending::Symbol = :truncate
     far_factor::Float64 = 1e3
+    rows::Union{Nothing,Vector{Float64}} = nothing
 end
 
 function check_options(o::WakeOptions)
     o.direction in (:freestream, :bisector) || throw(ArgumentError("direction must be :freestream or :bisector, not $(o.direction)"))
-    o.ending in (:truncate, :semi_infinite) || throw(ArgumentError("ending must be :truncate or :semi_infinite, not $(o.ending)"))
+    o.ending in (:truncate, :semi_infinite, :closed) ||
+        throw(ArgumentError("ending must be :truncate, :semi_infinite or :closed, not $(o.ending)"))
     o.growth >= 1 && o.length > 0 && o.far_factor > 1 || throw(ArgumentError("growth must be ≥ 1, length > 0 and far_factor > 1"))
+    isnothing(o.rows) || (Base.length(o.rows) >= 2 && iszero(o.rows[1]) && all(>(0), diff(o.rows))) ||
+        throw(ArgumentError("rows must start at 0 and increase"))
     return o
 end
 
@@ -41,7 +48,7 @@ layer of strength μ is bounded by a filament of strength μ running clockwise a
 across a thin band, γ = n × ∇μ points against the counterclockwise tangent), so the filaments run upstream along the
 first trailing edge node's side and downstream along the last's, continuing the trailing vorticity of the wake sheet
 (for a lifting wing, the right tip vortex runs downstream). No filament crosses the far end (no spurious starting
-vortex).
+vortex), unless the wake is `:closed`: a filament then runs along the last row against τ (`te_panel`).
 """
 struct RigidWake{T}
     x::Vector{SVector{3,T}}
@@ -101,10 +108,14 @@ function build_wake(g::SurfaceGeometry{T}, dm::DOFMapping{T}, V∞::SVector{3}; 
     n == 0 && throw(ArgumentError("the geometry has no trailing edge to shed a wake from"))
     d = SVector{3,T}(normalize(V∞))
     span = maximum(norm(wte.x[i] - wte.x[j]) for i in 1:n, j in 1:n)
-    ℓ1 = T(isnothing(opts.first_row) ? te_panel_size(g) : opts.first_row)
-    rows = T[0, ℓ1]
-    while rows[end] < opts.length * span
-        push!(rows, rows[end] + (rows[end] - rows[end-1]) * opts.growth)
+    if isnothing(opts.rows)
+        ℓ1 = T(isnothing(opts.first_row) ? te_panel_size(g) : opts.first_row)
+        rows = T[0, ℓ1]
+        while rows[end] < opts.length * span
+            push!(rows, rows[end] + (rows[end] - rows[end-1]) * opts.growth)
+        end
+    else
+        rows = Vector{T}(opts.rows)
     end
     opts.ending == :semi_infinite && push!(rows, rows[end] * opts.far_factor)
     nrow = length(rows) - 1
@@ -132,9 +143,24 @@ function build_wake(g::SurfaceGeometry{T}, dm::DOFMapping{T}, V∞::SVector{3}; 
             append!(filaments, [(id(line[1], j + 1), id(line[1], j)) for j in 0:nrow-1])
             append!(filaments, [(id(line[m], j), id(line[m], j + 1)) for j in 0:nrow-1])
         end
+        if opts.ending == :closed # the far end, clockwise about the normal: from B back to A along the last row
+            append!(filaments, [(id(B, nrow), id(A, nrow)) for (A, B) in segments])
+        end
     end
     return RigidWake(x, te, row, tris, filaments, rows, span, opts)
 end
+
+"""
+    te_panel(g, dm, V∞; length=te_panel_size(g), direction=:freestream)
+
+The implicit trailing edge panel of a free wake: one row of wake strips of the given length, along the freestream or
+the trailing edge bisector, carrying the Kutta rows' μ_w like a rigid wake and closed by the filament along its
+downstream edge, where its doublet layer ends. Assembled once into the matrix; the free wake shed from that edge starts
+with the opposite filament (strength its own first row's μ), so the two cancel in steady flow and the difference is
+the vorticity shed in the current step.
+"""
+te_panel(g::SurfaceGeometry, dm::DOFMapping, V∞::SVector{3}; length::Real=te_panel_size(g), direction::Symbol=:freestream) =
+    build_wake(g, dm, V∞; opts=WakeOptions(rows=[0.0, Float64(length)], ending=:closed, direction=direction))
 
 """Flat triangle elements of the wake, in triangle order"""
 wake_elements(w::RigidWake) = [FlatTriangle(w.x[t[1]], w.x[t[2]], w.x[t[3]]) for t in w.tris]

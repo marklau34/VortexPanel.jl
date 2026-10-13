@@ -12,7 +12,7 @@ using ..Elements: FlatTriangle, IsoQuad, sheet_strength, gradient, gauss_legendr
 using ..Assembly: MixedMesh
 using ..Wake: RigidWake, wake_elements
 
-export element_values, sheet_strengths, surface_velocity, gradient_velocity, pressure_coefficient, nodal_average
+export element_values, sheet_strengths, surface_velocity, gradient_velocity, pressure_coefficient, nodal_average, body_velocity
 export pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading, surface_pressure
 
 """Nodal doublet values of every element's corners from the slot values"""
@@ -72,8 +72,44 @@ perturbation potential (the interior perturbation is uniform), so this needs no 
 gradient_velocity(els::AbstractVector{<:FlatTriangle}, dm::DOFMapping, μ::AbstractVector, V∞::SVector{3}) =
     [V∞ - dot(V∞, el.n) * el.n + gradient(el, m) for (el, m) in zip(els, element_values(dm, μ))]
 
-"""Pressure coefficient 1 - |u|²/|V∞|²"""
+"""
+    pressure_coefficient(u, V∞)
+    pressure_coefficient(u, V∞, dμdt)
+
+Pressure coefficient 1 - |u|²/|V∞|², and with the rate of change of the doublet (the outer perturbation potential) at
+the same points, the unsteady Bernoulli equation's 1 - |u|²/|V∞|² - 2 ∂μ/∂t / |V∞|²
+"""
 pressure_coefficient(u::AbstractVector, V∞::SVector{3}) = [1 - dot(v, v) / dot(V∞, V∞) for v in u]
+pressure_coefficient(u::AbstractVector, V∞::SVector{3}, dμdt::AbstractVector) =
+    [1 - (dot(v, v) + 2 * d) / dot(V∞, V∞) for (v, d) in zip(u, dμdt)]
+
+"""
+    body_velocity(els, σ, γ, xs; kernel_far=FAR_DEFAULT, threaded=true)
+
+Velocity the body's sources σ and vortex sheets γ induce at the points xs, which must lie off its triangles (a free
+wake's nodes and particles): Σ σ_s w_s(x) + γ_s × w_s(x), without the freestream
+"""
+function body_velocity(els::AbstractVector{<:FlatTriangle}, σ::AbstractVector, γ::AbstractVector, xs::AbstractVector{<:SVector{3}};
+    kernel_far::Real=FAR_DEFAULT, threaded::Bool=true)
+    u = similar(xs)
+    function at(i)
+        x = xs[i]
+        acc = zero(x)
+        for (s, el) in enumerate(els)
+            w = source_velocity(el.src, x; far=kernel_far)
+            acc += σ[s] * w + cross(γ[s], w)
+        end
+        u[i] = acc
+    end
+    if threaded
+        Threads.@threads for i in eachindex(xs)
+            at(i)
+        end
+    else
+        foreach(at, eachindex(xs))
+    end
+    return u
+end
 
 """Area-weighted average of element values at the nodes, for plots"""
 function nodal_average(g::SurfaceGeometry, els::AbstractVector{<:FlatTriangle}, values::AbstractVector)

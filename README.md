@@ -18,6 +18,10 @@ Steps 1–5 are done, with validation stages 1–8. They cover:
 - **Comparison with MESA** (stage 6): both codes on the same meshes, with an exact two-dimensional referee for the section. The zero-tip Kutta condition (`DOFMapOptions(tip_kutta=:zero)`) became the default here.
 - **Isoparametric quads** (stage 7): the element the design doc defers. `MixedMesh` keeps the input's quads whole, with bilinear μ and numerically integrated inner integrals, and is compared with the split triangles on the cube-sphere and the wing.
 - **Test weights** (stage 8): the hat functions (default), median dual cells and one-rings, on the wing with clean and abused meshes.
+- **`VortexPanel.FreeWake`** (phase 2): the design doc's first deferred item, a free wake shed into vortex particles.
+  - The time stepping mirrors MESA's: an implicit trailing-edge panel, and free panel rows advected by forward Euler.
+  - The conversion is the design doc's: local to each wake triangle, one particle per triangle (two per quad).
+  - The wake couples into the body through its velocity alone, with the matrix factored once.
 
 ## Layout
 
@@ -27,11 +31,14 @@ src/dofmap/      DOFMap: build_dofmap(g; opts) -> DOFMapping (C, K, slots), redu
 src/kernels/     Kernels: SourceTriangle, source_velocity, sheet_velocity, segment_velocity (vortex filament)
 src/elements/    Elements: FlatTriangle (hat basis, γ_b), quadrature rules and tiers (TierRules); IsoQuad (bilinear),
                  project, quad_field (its inner integrals), rules on the parameter square (SquareTiers)
-src/wake/        Wake: build_wake(g, dm, V∞; opts) -> RigidWake (strips, tip filaments), WakeOptions, write_vtk
+src/wake/        Wake: build_wake(g, dm, V∞; opts) -> RigidWake (strips, tip filaments), WakeOptions, te_panel, write_vtk
 src/assembly/    Assembly: assemble(g, dm, els, σ, V∞; opts, wake) -> A, b (tiers incl. contact_rule); bordered_system,
-                 solve_galerkin; consistency; MixedMesh(g, dm) and assemble(g, dm, mesh::MixedMesh, V∞; opts, wake)
-src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average;
-                 pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading; surface_pressure (MixedMesh)
+                 solve_galerkin, factorize_galerkin; explicit_rhs (known vortex elements in b); consistency;
+                 MixedMesh(g, dm) and assemble(g, dm, mesh::MixedMesh, V∞; opts, wake)
+src/post/        Post: surface_velocity (singularity sums), gradient_velocity, pressure_coefficient, nodal_average,
+                 body_velocity; pressure_force, kutta_joukowski_force, trefftz_drag, spanwise_loading; surface_pressure
+src/freewake/    FreeWake: FreeWakeSim(g, dm, V∞; opts) with step!/run!, FreeWakeOptions, convert_oldest!,
+                 write_free_wake_vtk (the Rosenhead–Moore Blob kernel is in Kernels)
 src/meshtools/   MeshTools: icosphere, cube_sphere, uv_sphere, abuse, skew_wing, ...
 test/            Pkg.test() (needs the local PAGE release tree)
 validation/      reference wing, MESA baseline, geometry report, sphere, ellipsoid, wing, comparison, element and
@@ -64,6 +71,7 @@ julia -t auto --project=validation validation/wing/run_wing.jl               # v
 julia -t auto --project=validation validation/comparison/run_comparison.jl   # validation stage 6: against MESA (~25 min)
 julia -t auto --project=validation validation/elements/run_elements.jl       # validation stage 7: triangles against quads (~2 h)
 julia -t auto --project=validation validation/test_weights/run_test_weights.jl # validation stage 8: test weights (~20 min)
+julia -t auto --project=validation validation/freewake/run_freewake.jl     # phase 2: free wake and particles, against MESA (~25 min)
 julia -t auto --project=validation validation/examples/abused_wing.jl level=2 abuse=all   # example: abused wing, Cp in VTK
 ```
 
@@ -82,7 +90,8 @@ Outputs go to `validation/output/`, which is not tracked:
 - `examples/` the VTK of `abused_wing.jl`: body (Cp, Cp at the nodes, μ, quality), classified edges, wake (μ_w) and tip filaments;
 - `comparison/` CSV tables and SVG plots of every section of the stage-6 study (refinement, refinement by direction, the two-dimensional limit, Cp and spanwise loading, skew, trailing-edge misalignment, zero incidence, robustness), and `provenance.txt` with the codes' git commits;
 - `elements/` CSV tables and SVG plots of the stage-7 study (cube-sphere, refinement, sectional accuracy with each aspect ratio's values, Γ around midspan, midspan Cp, skew with both tip conditions, trailing-edge misalignment, zero incidence, abused meshes);
-- `test_weights/` CSV tables and SVG plots of the stage-8 study (refinement, sectional accuracy, midspan Cp, abused meshes, zero incidence).
+- `test_weights/` CSV tables and SVG plots of the stage-8 study (refinement, sectional accuracy, midspan Cp, abused meshes, zero incidence);
+- `freewake/` CSV tables and SVG plots of the free-wake study (consistency, impulsive start, conversion, free wake and its sensitivity, MESA, abused meshes), and VTK of the final free wakes (free rows, particles, trailing-edge panel).
 
 ## Geometry conventions (used by the later steps)
 
@@ -600,6 +609,139 @@ Lift is unaffected: on these meshes the quads change it less than the triangles 
 Their price is the assembly cost and a larger quadrature error on badly distorted quads.
 
 A split that never flips under small perturbations would give the triangles the same skew insensitivity at their own cost. Keeping a mesh family's diagonals (`split=:pattern`) does that in these studies, but no general rule of that kind is built yet. Any mirror-symmetric rule would also keep the mirror line.
+
+## Free wake with vortex particles (phase 2)
+
+This is the design doc's first deferred item. Its time stepping mirrors MESA's:
+- an implicit trailing-edge panel carries the Kutta condition;
+- the free panel rows behind it keep their strength once shed and move with the flow by forward Euler;
+- beyond `max_rows` rows the oldest row is converted into vortex particles;
+- there is no vortex stretching yet.
+
+The conversion itself follows the design doc, not MESA. It is local to each wake triangle: a triangle's particle comes from its own corner doublets and corners only, and nothing is converted across the interface edge (details below).
+
+`validation/freewake/run_freewake.jl` validates it on the reference wing at α = 5°, started impulsively.
+
+```julia
+sim = FreeWakeSim(g, dm, V∞; opts=FreeWakeOptions(dt=0.06, max_rows=10))  # assembles and factors once
+run!(sim, 200)                            # sim.history: the loads of every step
+write_free_wake_vtk(sim, "out/wing")      # the free rows and the particles, for ParaView
+```
+
+**Coupling.**
+- **The trailing-edge panel is implicit.** `te_panel` builds one row of wake strips of length te_len (default 0.3 |V∞| dt), closed by a filament along its downstream edge (`WakeOptions(rows, ending=:closed)`). It is assembled with the body, and the bordered matrix is factored once (`factorize_galerkin`). Its doublets follow the Kutta rows, as for the rigid wake.
+- **Everything behind it is explicit.** The free rows' sheets and filaments and the particles enter only the right-hand side, through their velocity (`explicit_rhs`). A step costs one right-hand side and one back-substitution with the stored factors.
+- **The coupling is exact.** Take a rigid wake, keep its first row as the trailing-edge panel, and freeze the other rows as explicit elements at the implicit solution. The solve gives that solution back to 1e-14 at L1 and L2, for panels 0.25 to 4 trailing-edge panels long.
+- **The right-hand side must be integrated with the assembly's own tiers** (contact and near rules). Through a fixed 7-point rule per test triangle, the lift came out 1.6% low with a trailing-edge panel a quarter of a panel long: the first free row sits that close to the trailing edge.
+
+**The free rows.** The rows are stored from the newest, on the trailing-edge panel's downstream edge, to the oldest, each with the μ_w it was shed with. Panels interpolate μ linearly between rows, so shed vorticity is a sheet, not a filament.
+- **Filaments** sit only where the layer is cut:
+  - the interface along the newest row, with that row's μ, which cancels the trailing-edge panel's downstream filament in steady flow;
+  - the tips;
+  - the far end, with strength μ − μ_line, which is the starting vortex until the first conversion.
+- **One step**, in MESA's order:
+  1. solve, then compute the loads;
+  2. compute the velocities at every free node and particle;
+  3. advance them by forward Euler;
+  4. shed a new row on the trailing-edge panel's edge, with this step's μ_w;
+  5. convert the oldest row while more than `max_rows` rows remain.
+- **The first step** sheds and advects a row before shedding the next one, as MESA does. Otherwise the starting vortex would be released a step late.
+
+**Conversion** of the oldest row:
+1. A particle at each triangle's centroid takes α = ∮μ dl = γA, two per quad.
+2. Two particles at the 2-point Gauss positions of each tip side and of the far edge take that edge's strength, μ − μ_line. That is the starting vortex at the first conversion and zero afterwards.
+3. μ_line then takes the row's upstream doublets, so nothing is created at the interface. With `max_rows = 0` this leaves MESA's leftover line by itself.
+
+A conversion leaves the total vorticity and its first moment (the impulse) unchanged, to rounding.
+
+Each triangle's particle uses only that triangle's corners and corner doublets, as the design doc specifies. MESA's conversion is not local:
+- it makes one particle per strip, at the quad's centroid, from the panel's edge circulations;
+- it splits each side edge's circulation half and half with the neighbouring strip, so it uses the neighbour's strength;
+- it folds the starting vortex into the first particles;
+- it leaves a vortex line at the interface.
+
+MESA's constant-strength panels carry all their vorticity on their edges, so its conversion has to share those edges between neighbours. The linear doublet here carries the vorticity as sheets inside the triangles, and there are no filaments between triangles to share.
+
+**Velocities at wake points.** The body uses its exact kernels. Every wake element is a Rosenhead–Moore blob:
+- the trailing-edge panel's and free rows' sheets are represented by the particles a conversion would create;
+- their filaments by 2-point Gauss blobs;
+- the particles by themselves.
+
+Cores are 1.5 × the element's size, and at least |V∞| dt. The exact panel kernels are singular at the wake's own nodes; MESA uses lines with Rankine cores there. With this representation a conversion changes no wake velocity, only the body's right-hand side.
+
+**Loads** (each step):
+- **Pressure:** Cp = 1 − |u|²/V∞² − 2μ̇/V∞², with μ̇ by backward difference.
+- **Kutta–Joukowski** from μ_w; during a transient this is only the circulatory part.
+- **Impulse:** F = −(2/V∞²) dI/dt, with I = ½Σ x × α over all vorticity: body sheets, trailing-edge panel, free rows and particles.
+- **Check:** the total vorticity Ω.
+
+**Impulsive start with a prescribed wake** (rows moved with V∞, no conversion, L1, dt = trailing-edge panel size):
+
+| wake length (spans) | CL (pressure) | CL (KJ) | CL (impulse) | steady CL (KJ), closed wake of the same rows | gap | closed wake − open wake |
+|---|---|---|---|---|---|---|
+| 0.26 | 0.2715 | 0.2363 | 0.2698 | 0.3006 | −6.4e-2 | −4.1e-2 |
+| 1.0 | 0.3253 | 0.3238 | 0.3284 | 0.3364 | −1.3e-2 | −5.5e-3 |
+| 2.0 | 0.3353 | 0.3382 | 0.3389 | 0.3403 | −2.1e-3 | −1.6e-3 |
+| 3.0 | 0.3372 | 0.3406 | 0.3407 | 0.3411 | −5.5e-4 | −7.4e-4 |
+| 5.0 | 0.3379 | 0.3415 | 0.3415 | 0.3416 | −9.4e-5 | −2.8e-4 |
+
+- **Convergence to the steady state:**
+  - The marched lift converges onto the steady solve on the same rows, faster than that solve converges to the open rigid wake (whose gap falls as (b/L)²).
+  - At 5 spans the lift is 0.1% below the rigid wake's (CL 0.3383, CL_KJ 0.3418), and the impulse route matches Kutta–Joukowski to 1e-4.
+- **Kelvin's theorem** holds to rounding: |Ω_total| ≤ 1.6e-15.
+- **Time step:** at a fixed ratio te_len/(|V∞| dt), halving or doubling dt changes CL at 2 spans by under 0.06%.
+- **The trailing-edge panel's length matters only in the transient.**
+  - At 1 span, te_len = 0.1 |V∞| dt gives 0.313 and |V∞| dt gives 0.331.
+  - At 2 spans the gap has narrowed to 0.336 against 0.339.
+  - In steady flow the length doesn't matter at all (the exact-coupling check above).
+  - 0.3 |V∞| dt is about where Katz & Plotkin place the newest shed vortex.
+
+**Conversion** (prescribed wake, L1, 5 spans). Lift change from never converting:
+
+| `max_rows` | 0 | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|
+| ΔCL (KJ), at 5 spans | +1.55% | +0.74% | +0.44% | +0.21% | +0.08% | +0.02% |
+| largest \|ΔCL (KJ)\| over the run | 4.4e-2 | 1.7e-2 | 9.1e-3 | 3.6e-3 | 1.1e-3 | 2.5e-4 |
+
+Particles close to the body stand for the sheet less well than its panels, so converting further downstream costs less. MESA's example uses 10 rows; at 10 the change is under 0.1%.
+
+**Free wake** (forward Euler, `max_rows` = 10, to 5 spans):
+
+| level | steps | time | particles | CL (pressure) at 5 spans | CL (KJ) at 5 spans | extrapolated in 1/L²: CL, CL (KJ) | rigid wake: CL, CL (KJ) |
+|---|---|---|---|---|---|---|---|
+| L1 | 232 | 18 s | 8,470 | 0.3367 | 0.3404 | 0.3372, 0.3410 | 0.3383, 0.3418 |
+| L2 | 463 | 7 min | 32,684 | 0.3372 | 0.3400 | 0.3377, 0.3406 | 0.3389, 0.3415 |
+
+- **Roll-up lowers the lift slightly.** Free against prescribed at 5 spans (L1) is −0.41% by pressure and −0.37% by Kutta–Joukowski. Extrapolated, the free wake sits 0.24–0.35% below the rigid wake at both levels.
+- **The settings hardly matter** (L1, at 5 spans):
+  - particle cores 1.0× and 2.5× the element size: ±0.05%;
+  - `max_rows` 4 and 20: +0.13% and +0.01%;
+  - dt doubled or halved: under 0.01%.
+- **It stays well behaved.** Velocities stay below 1.03 |V∞|.
+- **Without stretching the total vorticity drifts.** The far edge of the panel rows stretches while the particles' strengths stay fixed. By 5 spans |Ω_total| is 0.7% (L1) and 4% (L2) of the largest μ_w times the span. The impulse route depends on that drift, so in free mode it is unreliable: +1.7% against Kutta–Joukowski at L2. The pressure and Kutta–Joukowski routes are unaffected.
+- **Cost.** At the end of the L2 run a step takes 1.8 s on 16 threads, with 32,684 particles: direct particle sums, the body's velocity at every particle, and every particle in the right-hand side. L3, or longer wakes, would need particle deletion (`delete_beyond`) or a treecode.
+
+**Against MESA's free wake** (L1, the same mesh, dt, te_len = 0.045, `max_rows` 10 and a single particle core 1.5 × the trailing-edge panel size in both):
+
+| | ours CL (pressure) | ours CL (KJ) | MESA CL |
+|---|---|---|---|
+| prescribed wake, 5 spans | 0.3380 | 0.3416 | 0.2991 |
+| free wake, 5 spans | 0.3370 | 0.3406 | 0.2984 |
+| rigid wake (stages 5 and 6) | 0.3383 | 0.3418 | 0.3287 |
+
+| te_len (prescribed wake, 2 spans) | 0.0146 | 0.0292 | 0.0585 | 0.117 |
+|---|---|---|---|---|
+| ours CL | 0.3352 | 0.3358 | 0.3362 | 0.3365 |
+| MESA CL | 0.2814 | 0.2909 | 0.3021 | 0.3123 |
+
+- **MESA's free-wake lift is 9% below its own rigid wake, and it depends on the trailing-edge panel's length.** It rises 11% from te_len 0.0146 to 0.117.
+  - This is the error its dev notes describe (dev/wake_coupling_findings.md): the trailing-edge panel enters its matrix through the potential, while the shed wake enters through velocity.
+  - Ours varies by 0.4% at 2 spans, the transient described above, and agrees with our rigid wake.
+- **Roll-up costs both codes about as much lift:** −0.32% for ours and −0.24% for MESA, free against prescribed.
+
+**Abused meshes** (MESA's smoke set and all abuses at once, L1, free wake to 5 spans):
+- Every mesh runs, with velocities below 1.03 |V∞|.
+- The lift changes match the rigid wake's of stage 5 to within 0.04%. Opposite lean of 0.3 gives −0.93%, misaligned trailing edges −0.60%, independent jitter −0.49%, jitter 0.30%, and T-junctions, gaps and slivers under 0.12%.
 
 ## Test weights on the wing (validation stage 8)
 
